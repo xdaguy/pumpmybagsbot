@@ -121,7 +121,7 @@ sudo systemctl start pumpbags.service
 sudo systemctl status pumpbags.service
 ```
 
-## Data Storage
+## Data Storag
 
 The bot stores data in three JSON files:
 - `user_data.json`: Stores user information and favorite coins
