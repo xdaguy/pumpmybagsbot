@@ -42,6 +42,11 @@ TIMEFRAME_DURATIONS = {
     "LONG": 30     # 30 days for long-term signals
 }
 
+# Price cache to reduce API calls
+price_cache = {}
+# Cache expiry in seconds (5 minutes)
+PRICE_CACHE_EXPIRY = 5 * 60
+
 # Initialize data
 if os.path.exists(USER_DATA_FILE):
     with open(USER_DATA_FILE, 'r') as f:
@@ -108,6 +113,87 @@ def parse_price(price_str):
         except ValueError:
             return None
 
+async def get_crypto_price(symbol):
+    """Get current crypto price from an API with caching"""
+    try:
+        # Remove $ if present and convert to lowercase
+        clean_symbol = symbol.replace("$", "").lower()
+        
+        # Check cache first
+        current_time = datetime.now().timestamp()
+        if clean_symbol in price_cache:
+            cache_time, price = price_cache[clean_symbol]
+            # If cache is still valid (less than PRICE_CACHE_EXPIRY seconds old)
+            if current_time - cache_time < PRICE_CACHE_EXPIRY:
+                logger.debug(f"Using cached price for {clean_symbol}: ${price}")
+                return price
+        
+        # Common mapping for popular coins
+        coin_mapping = {
+            "btc": "bitcoin",
+            "eth": "ethereum",
+            "ada": "cardano",
+            "bnb": "binancecoin",
+            "sol": "solana",
+            "xrp": "ripple",
+            "doge": "dogecoin",
+            "dot": "polkadot",
+            "avax": "avalanche-2",
+            "shib": "shiba-inu",
+            "matic": "polygon",
+            "link": "chainlink",
+            "ltc": "litecoin",
+            "uni": "uniswap",
+            "atom": "cosmos",
+            "algo": "algorand",
+            "xlm": "stellar",
+            "etc": "ethereum-classic"
+        }
+        
+        # Try with mapping first
+        coin_id = coin_mapping.get(clean_symbol, clean_symbol)
+        url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd"
+        response = requests.get(url, timeout=10)
+        data = response.json()
+        
+        if data and coin_id in data:
+            price = data[coin_id]["usd"]
+            # Store in cache
+            price_cache[clean_symbol] = (current_time, price)
+            return price
+        
+        # If not found with mapping, try direct ID
+        url = f"https://api.coingecko.com/api/v3/simple/price?ids={clean_symbol}&vs_currencies=usd"
+        response = requests.get(url, timeout=10)
+        data = response.json()
+        
+        if data and clean_symbol in data:
+            price = data[clean_symbol]["usd"]
+            # Store in cache
+            price_cache[clean_symbol] = (current_time, price)
+            return price
+        
+        # If still not found, try search
+        search_url = f"https://api.coingecko.com/api/v3/search?query={clean_symbol}"
+        search_response = requests.get(search_url, timeout=10)
+        search_data = search_response.json()
+        
+        if search_data and "coins" in search_data and search_data["coins"]:
+            coin_id = search_data["coins"][0]["id"]
+            url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd"
+            response = requests.get(url, timeout=10)
+            data = response.json()
+            if data and coin_id in data:
+                price = data[coin_id]["usd"]
+                # Store in cache
+                price_cache[clean_symbol] = (current_time, price)
+                return price
+        
+        return None
+    except Exception as e:
+        logger.error(f"Error fetching crypto price: {e}")
+        return None
+
 async def get_historical_price(coin, timestamp):
     """Get historical price for a coin at a specific timestamp"""
     try:
@@ -124,7 +210,7 @@ async def get_historical_price(coin, timestamp):
             "to": date_unix + 3600     # 1 hour after
         }
         
-        response = requests.get(url, params=params)
+        response = requests.get(url, params=params, timeout=10)
         data = response.json()
         
         if "prices" in data and len(data["prices"]) > 0:
@@ -244,6 +330,85 @@ async def periodic_signal_check(context: ContextTypes.DEFAULT_TYPE):
     updated = await update_all_signals_performance()
     if updated:
         logger.info("Signal performances updated")
+        
+        # Send notifications for updated signals
+        completed_signals = []
+        for signal in signals_data["signals"]:
+            # Check if signal was just completed (has exit_date within the last hour)
+            if "exit_date" in signal and signal.get("status") != PENDING:
+                exit_date = datetime.strptime(signal["exit_date"], "%Y-%m-%d %H:%M:%S")
+                if datetime.now() - exit_date < timedelta(hours=1):
+                    completed_signals.append(signal)
+        
+        # Send notifications for each completed signal
+        for signal in completed_signals:
+            coin = signal.get("coin")
+            status = signal.get("status")
+            timeframe = signal.get("timeframe")
+            risk_level = signal.get("risk")
+            
+            status_emoji = "✅" if status == HIT_TARGET else "❌" if status == HIT_STOPLOSS else "⏰"
+            performance = signal.get("performance", 0)
+            perf_sign = "+" if performance >= 0 else ""
+            
+            message = (
+                f"{status_emoji} *Signal Update* {status_emoji}\n\n"
+                f"*Coin:* {coin}\n"
+                f"*Status:* {status}\n"
+                f"*Performance:* {perf_sign}{performance:.2f}%\n"
+                f"*Entry Price:* ${parse_price(signal.get('limit_order', '0')):,.2f}\n"
+                f"*Exit Price:* ${signal.get('exit_price', 0):,.2f}\n"
+                f"*Exit Date:* {signal.get('exit_date', 'Unknown')}\n\n"
+                f"*Original Signal:*\n{signal.get('text', 'N/A')}"
+            )
+            
+            # Send to subscribers based on their settings
+            for user_id, user_info in user_data["users"].items():
+                # Check if user is subscribed
+                is_subscribed = user_info.get("subscribed", False)
+                if not is_subscribed:
+                    continue
+                
+                # Check if signal mentions one of user's favorite coins
+                favorite_coins = user_info.get("favorite_coins", [])
+                is_favorite = coin in favorite_coins if coin else False
+                
+                # Check user settings
+                settings = user_data.get("settings", {}).get(user_id, {
+                    "notify_all_signals": True,
+                    "notify_favorites_only": False,
+                    "risk_filter": "ALL",
+                    "timeframe_filter": "ALL"
+                })
+                
+                # Apply user settings filters
+                should_notify = False
+                
+                # Check notification preferences
+                if settings["notify_all_signals"] and not settings["notify_favorites_only"]:
+                    should_notify = True
+                elif settings["notify_favorites_only"] and is_favorite:
+                    should_notify = True
+                else:
+                    continue  # Skip this user based on notification settings
+                
+                # Apply risk level filter if set
+                if settings["risk_filter"] != "ALL" and risk_level != settings["risk_filter"]:
+                    continue  # Skip if risk level doesn't match filter
+                
+                # Apply timeframe filter if set
+                if settings["timeframe_filter"] != "ALL" and timeframe != settings["timeframe_filter"]:
+                    continue  # Skip if timeframe doesn't match filter
+                
+                try:
+                    await context.bot.send_message(
+                        chat_id=user_info["chat_id"],
+                        text=message,
+                        parse_mode="Markdown"
+                    )
+                    logger.info(f"Signal update sent to user {user_id}")
+                except Exception as e:
+                    logger.error(f"Failed to send signal update to user {user_id}: {e}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /start is issued."""
@@ -453,62 +618,6 @@ async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text("You've unsubscribed from signals. You can resubscribe anytime with /subscribe.")
     else:
         await update.message.reply_text("You weren't subscribed. Use /subscribe to receive crypto signals.")
-
-async def get_crypto_price(symbol):
-    """Get current crypto price from an API"""
-    try:
-        # Using CoinGecko API (free, no API key required)
-        # Remove $ if present and convert to lowercase
-        clean_symbol = symbol.replace("$", "").lower()
-        
-        # Common mapping for popular coins
-        coin_mapping = {
-            "btc": "bitcoin",
-            "eth": "ethereum",
-            "ada": "cardano",
-            "bnb": "binancecoin",
-            "sol": "solana",
-            "xrp": "ripple",
-            "doge": "dogecoin",
-            "dot": "polkadot",
-            "avax": "avalanche-2",
-            "shib": "shiba-inu"
-        }
-        
-        # Try with mapping first
-        coin_id = coin_mapping.get(clean_symbol, clean_symbol)
-        url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd"
-        response = requests.get(url)
-        data = response.json()
-        
-        if data and coin_id in data:
-            return data[coin_id]["usd"]
-        
-        # If not found with mapping, try direct ID
-        url = f"https://api.coingecko.com/api/v3/simple/price?ids={clean_symbol}&vs_currencies=usd"
-        response = requests.get(url)
-        data = response.json()
-        
-        if data and clean_symbol in data:
-            return data[clean_symbol]["usd"]
-        
-        # If still not found, try search
-        search_url = f"https://api.coingecko.com/api/v3/search?query={clean_symbol}"
-        search_response = requests.get(search_url)
-        search_data = search_response.json()
-        
-        if search_data and "coins" in search_data and search_data["coins"]:
-            coin_id = search_data["coins"][0]["id"]
-            url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd"
-            response = requests.get(url)
-            data = response.json()
-            if data and coin_id in data:
-                return data[coin_id]["usd"]
-        
-        return None
-    except Exception as e:
-        logger.error(f"Error fetching crypto price: {e}")
-        return None
 
 async def price_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Check the current price of a cryptocurrency"""
@@ -984,6 +1093,9 @@ async def signals_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     # Get the 5 most recent signals
     recent_signals = sorted(signals_data["signals"], key=lambda x: x["timestamp"], reverse=True)[:5]
     
+    # Send a header message
+    await update.message.reply_text("📊 *Last 5 Signals*\n\nShowing the most recent signals:", parse_mode="Markdown")
+    
     for signal in recent_signals:
         # Create vote keyboard
         keyboard = [
@@ -1324,7 +1436,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 favorite_coins = user_info.get("favorite_coins", [])
                 is_favorite = coin in favorite_coins if coin else False
                 
-                if is_subscribed:
+                # Check user settings
+                settings = user_data.get("settings", {}).get(user_id, {
+                    "notify_all_signals": True,
+                    "notify_favorites_only": False,
+                    "risk_filter": "ALL",
+                    "timeframe_filter": "ALL"
+                })
+                
+                # Apply user settings filters
+                should_notify = False
+                
+                # Check notification preferences
+                if settings["notify_all_signals"] and not settings["notify_favorites_only"]:
+                    should_notify = True
+                elif settings["notify_favorites_only"] and is_favorite:
+                    should_notify = True
+                else:
+                    continue  # Skip this user based on notification settings
+                
+                # Apply risk level filter if set
+                if settings["risk_filter"] != "ALL" and risk_level != settings["risk_filter"]:
+                    continue  # Skip if risk level doesn't match filter
+                
+                # Apply timeframe filter if set
+                if settings["timeframe_filter"] != "ALL" and timeframe != settings["timeframe_filter"]:
+                    continue  # Skip if timeframe doesn't match filter
+                
+                if is_subscribed and should_notify:
                     try:
                         await context.bot.send_message(
                             chat_id=user_info["chat_id"],
@@ -1430,21 +1569,136 @@ async def trader_performance_command(update: Update, context: ContextTypes.DEFAU
     await update.message.reply_text(report, parse_mode="Markdown")
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle button callbacks."""
+    """Handle button callbacks for voting and other interactive features."""
     query = update.callback_query
+    callback_data = query.data
+    user_id = str(update.effective_user.id)
+    
+    # Acknowledge the callback
     await query.answer()
     
-    data = query.data
+    # Settings-related callbacks
+    if callback_data.startswith("settings_"):
+        # Initialize settings if needed
+        if "settings" not in user_data:
+            user_data["settings"] = {}
+        if user_id not in user_data["settings"]:
+            user_data["settings"][user_id] = {
+                "notify_all_signals": True,
+                "notify_favorites_only": False,
+                "risk_filter": "ALL",
+                "timeframe_filter": "ALL"
+            }
+        
+        settings = user_data["settings"][user_id]
+        
+        if callback_data == "settings_toggle_all":
+            # Toggle all signals notification
+            settings["notify_all_signals"] = not settings["notify_all_signals"]
+            # If enabling all signals, disable favorites only
+            if settings["notify_all_signals"]:
+                settings["notify_favorites_only"] = False
+                
+        elif callback_data == "settings_toggle_favorites":
+            # Toggle favorites only notification
+            settings["notify_favorites_only"] = not settings["notify_favorites_only"]
+            # If enabling favorites only, disable all signals
+            if settings["notify_favorites_only"]:
+                settings["notify_all_signals"] = False
+                
+        elif callback_data == "settings_risk":
+            # Cycle through risk filters: ALL -> LOW -> MEDIUM -> HIGH -> ALL
+            current = settings["risk_filter"]
+            if current == "ALL":
+                settings["risk_filter"] = "LOW"
+            elif current == "LOW":
+                settings["risk_filter"] = "MEDIUM"
+            elif current == "MEDIUM":
+                settings["risk_filter"] = "HIGH"
+            else:
+                settings["risk_filter"] = "ALL"
+                
+        elif callback_data == "settings_timeframe":
+            # Cycle through timeframe filters: ALL -> SHORT -> MID -> LONG -> ALL
+            current = settings["timeframe_filter"]
+            if current == "ALL":
+                settings["timeframe_filter"] = "SHORT"
+            elif current == "SHORT":
+                settings["timeframe_filter"] = "MID"
+            elif current == "MID":
+                settings["timeframe_filter"] = "LONG"
+            else:
+                settings["timeframe_filter"] = "ALL"
+                
+        elif callback_data == "settings_save":
+            await save_user_data()
+            await query.edit_message_text(
+                "✅ Settings saved successfully!\n\nUse /settings to view or change your settings again.",
+                parse_mode="Markdown"
+            )
+            return
+        
+        # Update message with new settings
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    f"{'✅' if settings['notify_all_signals'] else '❌'} All Signals", 
+                    callback_data="settings_toggle_all"
+                ),
+                InlineKeyboardButton(
+                    f"{'✅' if settings['notify_favorites_only'] else '❌'} Favorites Only",
+                    callback_data="settings_toggle_favorites"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    f"Risk Filter: {settings['risk_filter']}",
+                    callback_data="settings_risk"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    f"Timeframe Filter: {settings['timeframe_filter']}",
+                    callback_data="settings_timeframe"
+                )
+            ],
+            [
+                InlineKeyboardButton("Save Settings", callback_data="settings_save")
+            ]
+        ]
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        message = (
+            f"⚙️ *User Settings* ⚙️\n\n"
+            f"Configure your notification preferences:\n\n"
+            f"*Receive Notifications:*\n"
+            f"{'✅' if settings['notify_all_signals'] else '❌'} All signals\n"
+            f"{'✅' if settings['notify_favorites_only'] else '❌'} Favorites only\n\n"
+            f"*Risk Level Filter:* {settings['risk_filter']}\n"
+            f"*Timeframe Filter:* {settings['timeframe_filter']}\n\n"
+            f"Use the buttons below to change your settings."
+        )
+        
+        await query.edit_message_text(
+            message,
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
+        )
+        
+        return
+    
+    # Handle other button actions
     chat_id = str(query.message.chat_id)
     
-    if data == "add_coins":
+    if callback_data == "add_coins":
         await query.edit_message_text(
             "To add a coin to your favorites, use:\n"
             "/coins BTC\n\n"
             "Replace BTC with any cryptocurrency symbol."
         )
     
-    elif data == "remove_coins":
+    elif callback_data == "remove_coins":
         if chat_id in user_data["users"] and "favorite_coins" in user_data["users"][chat_id]:
             coins = user_data["users"][chat_id]["favorite_coins"]
             if not coins:
@@ -1468,8 +1722,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         else:
             await query.edit_message_text("You don't have any favorite coins yet.")
     
-    elif data.startswith("remove_"):
-        coin = data.split("_")[1]
+    elif callback_data.startswith("remove_"):
+        coin = callback_data.split("_")[1]
         if chat_id in user_data["users"] and "favorite_coins" in user_data["users"][chat_id]:
             if coin in user_data["users"][chat_id]["favorite_coins"]:
                 user_data["users"][chat_id]["favorite_coins"].remove(coin)
@@ -1480,12 +1734,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         else:
             await query.edit_message_text("You don't have any favorite coins yet.")
     
-    elif data.startswith("vote_"):
+    elif callback_data.startswith("vote_"):
         # Handle signal voting
-        parts = data.split("_")
+        parts = callback_data.split("_")
+        if len(parts) != 3:
+            return
+            
         signal_id = parts[1]
         vote_type = parts[2]  # "up" or "down"
         
+        # Find the signal
         for signal in signals_data["signals"]:
             if str(signal["id"]) == signal_id:
                 # Check if user already voted
@@ -1531,6 +1789,144 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 await save_signals_data()
                 break
 
+async def stat_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Display statistics about signals, subscribers, and success rates."""
+    
+    # Count total signals
+    total_signals = len(signals_data["signals"])
+    
+    # Count subscribers
+    subscribers_count = len(user_data.get("subscribers", []))
+    
+    # Calculate success rates
+    successful_signals = 0
+    failed_signals = 0
+    pending_signals = 0
+    
+    for signal in signals_data["signals"]:
+        status = signal.get("status", PENDING)
+        if status == HIT_TARGET:
+            successful_signals += 1
+        elif status in [HIT_STOPLOSS, EXPIRED]:
+            failed_signals += 1
+        else:
+            pending_signals += 1
+    
+    success_rate = round((successful_signals / total_signals * 100), 2) if total_signals > 0 else 0
+    
+    # Count unique coins
+    unique_coins = set()
+    for signal in signals_data["signals"]:
+        if "coin" in signal:
+            unique_coins.add(signal["coin"])
+    
+    # Count by timeframe
+    timeframe_counts = {tf: 0 for tf in TIMEFRAMES}
+    for signal in signals_data["signals"]:
+        tf = signal.get("timeframe")
+        if tf in timeframe_counts and tf is not None:
+            timeframe_counts[tf] += 1
+    
+    # Count by risk level
+    risk_counts = {risk: 0 for risk in RISK_LEVELS}
+    for signal in signals_data["signals"]:
+        risk = signal.get("risk")
+        if risk in risk_counts and risk is not None:
+            risk_counts[risk] += 1
+    
+    # Format message
+    message = (
+        f"📊 *Bot Statistics* 📊\n\n"
+        f"*Total Signals:* {total_signals}\n"
+        f"*Subscribers:* {subscribers_count}\n\n"
+        
+        f"*Signal Performance:*\n"
+        f"✅ Successful: {successful_signals} ({success_rate}%)\n"
+        f"❌ Failed: {failed_signals}\n"
+        f"⏳ Pending: {pending_signals}\n\n"
+        
+        f"*Unique Coins:* {len(unique_coins)}\n\n"
+        
+        f"*By Timeframe:*\n"
+        f"SHORT: {timeframe_counts['SHORT']}\n"
+        f"MID: {timeframe_counts['MID']}\n"
+        f"LONG: {timeframe_counts['LONG']}\n\n"
+        
+        f"*By Risk Level:*\n"
+        f"LOW: {risk_counts['LOW']}\n"
+        f"MEDIUM: {risk_counts['MEDIUM']}\n"
+        f"HIGH: {risk_counts['HIGH']}\n\n"
+        
+        f"*Most Recent Update:* {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+    
+    await update.message.reply_text(message, parse_mode="Markdown")
+
+async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Allow users to configure their notification settings."""
+    user_id = str(update.effective_user.id)
+    
+    # Initialize settings if needed
+    if "settings" not in user_data:
+        user_data["settings"] = {}
+    if user_id not in user_data["settings"]:
+        user_data["settings"][user_id] = {
+            "notify_all_signals": True,
+            "notify_favorites_only": False,
+            "risk_filter": "ALL",
+            "timeframe_filter": "ALL"
+        }
+    
+    settings = user_data["settings"][user_id]
+    
+    # Create keyboard for settings
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                f"{'✅' if settings['notify_all_signals'] else '❌'} All Signals", 
+                callback_data="settings_toggle_all"
+            ),
+            InlineKeyboardButton(
+                f"{'✅' if settings['notify_favorites_only'] else '❌'} Favorites Only",
+                callback_data="settings_toggle_favorites"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                f"Risk Filter: {settings['risk_filter']}",
+                callback_data="settings_risk"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                f"Timeframe Filter: {settings['timeframe_filter']}",
+                callback_data="settings_timeframe"
+            )
+        ],
+        [
+            InlineKeyboardButton("Save Settings", callback_data="settings_save")
+        ]
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    message = (
+        f"⚙️ *User Settings* ⚙️\n\n"
+        f"Configure your notification preferences:\n\n"
+        f"*Receive Notifications:*\n"
+        f"{'✅' if settings['notify_all_signals'] else '❌'} All signals\n"
+        f"{'✅' if settings['notify_favorites_only'] else '❌'} Favorites only\n\n"
+        f"*Risk Level Filter:* {settings['risk_filter']}\n"
+        f"*Timeframe Filter:* {settings['timeframe_filter']}\n\n"
+        f"Use the buttons below to change your settings."
+    )
+    
+    await update.message.reply_text(
+        message,
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
+
 def main() -> None:
     """Start the bot."""
     if not BOT_TOKEN:
@@ -1552,6 +1948,8 @@ def main() -> None:
     application.add_handler(CommandHandler("debug", debug_command))
     application.add_handler(CommandHandler("test", test_command))
     application.add_handler(CommandHandler("privacy", privacy_help))
+    application.add_handler(CommandHandler("stat", stat_command))
+    application.add_handler(CommandHandler("settings", settings_command))
     
     # Add callback query handler for button interactions
     application.add_handler(CallbackQueryHandler(button_callback))
