@@ -13,6 +13,34 @@ A Telegram bot that forwards crypto trading signals to subscribers when tagged i
 - ⭐ **Favorite Coins**: Users can track their favorite coins and get highlighted notifications
 - 🔍 **Coin Detection**: Automatically detects coin symbols in signals (format: $BTC)
 - 💎 **Coin Database**: Maintains a database of all coins mentioned in signals
+- ⚙️ **Custom Notifications**: User preference settings for notifications by risk level and timeframe
+
+## Project Structure
+
+The codebase uses a modular structure with directories organized by functionality:
+
+```
+pumpmybagsbot/
+├── main.py                  # Entry point for the bot
+├── src/                     # Source code directory
+│   ├── __init__.py          # Makes src a Python package
+│   ├── config.py            # Configuration, constants, and data loading
+│   ├── handlers/            # Command and callback handlers
+│   │   ├── __init__.py
+│   │   ├── command_handlers.py  # Bot command handlers
+│   │   ├── callback_handlers.py # Button callback handlers
+│   │   └── message_handlers.py  # Message handling
+│   └── services/            # Core services
+│       ├── __init__.py
+│       ├── data_handlers.py     # Data saving/loading
+│       ├── price_service.py     # Cryptocurrency price services
+│       ├── signal_processor.py  # Signal processing and analysis
+│       └── job_queue.py         # Periodic tasks
+├── signals.json             # Signal data storage
+├── user_data.json           # User data storage
+├── coins.json               # Coin data storage
+└── .env                     # Environment variables
+```
 
 ## Setup Instructions
 
@@ -51,7 +79,7 @@ BOT_TOKEN=your_bot_token_here
 ### 5. Start the Bot
 
 ```bash
-python bot.py
+python main.py
 ```
 
 ## Usage
@@ -66,6 +94,9 @@ python bot.py
 - `/price [symbol]` - Check current price of a cryptocurrency
 - `/coins [symbol]` - Track your favorite coins
 - `/performance` - View signal performance statistics
+- `/settings` - Configure notification preferences
+- `/stat` - View bot usage statistics
+- `/test` - Test if the bot is working in a group
 
 ### How to Use in Groups
 
@@ -89,6 +120,13 @@ python bot.py
 3. When a signal mentions one of your favorite coins, you'll receive an additional notification
 4. Manage your favorite coins list with the provided buttons
 
+### Notification Settings
+
+Use the `/settings` command to customize your notification preferences:
+- Choose to receive all signals or only those mentioning your favorite coins
+- Filter signals by risk level (LOW, MEDIUM, HIGH, or ALL)
+- Filter signals by timeframe (SHORT, MID, LONG, or ALL)
+
 ## Running on a Server
 
 For the bot to work continuously, you need to run it on a server. Here are some options:
@@ -107,7 +145,7 @@ After=network.target
 [Service]
 User=yourusername
 WorkingDirectory=/path/to/pumpmybagsbot
-ExecStart=/usr/bin/python3 /path/to/pumpmybagsbot/bot.py
+ExecStart=/usr/bin/python3 /path/to/pumpmybagsbot/main.py
 Restart=always
 
 [Install]
@@ -121,11 +159,11 @@ sudo systemctl start pumpbags.service
 sudo systemctl status pumpbags.service
 ```
 
-## Data Storag
+## Data Storage
 
 The bot stores data in three JSON files:
-- `user_data.json`: Stores user information and favorite coins
-- `signals.json`: Stores all signals with their voting history
+- `user_data.json`: Stores user information, favorite coins, and notification settings
+- `signals.json`: Stores all signals with their voting history and performance metrics
 - `coins.json`: Tracks all coins mentioned in signals and their statistics
 
 ## Disclaimer
