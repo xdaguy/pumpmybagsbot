@@ -2,8 +2,9 @@ import os
 import json
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 import requests
+import asyncio
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes, ConversationHandler
@@ -27,6 +28,19 @@ COINS_FILE = "coins.json"
 # Define timeframes and risk levels
 TIMEFRAMES = ["SHORT", "MID", "LONG"]  # Short-term, Mid-term, Long-term
 RISK_LEVELS = ["LOW", "MEDIUM", "HIGH"]  # Risk levels for signals
+
+# Signal performance status constants
+PENDING = "PENDING"
+HIT_TARGET = "HIT_TARGET"
+HIT_STOPLOSS = "HIT_STOPLOSS"
+EXPIRED = "EXPIRED"
+
+# Signal timeframe durations (in days)
+TIMEFRAME_DURATIONS = {
+    "SHORT": 1,    # 1 day for short-term signals
+    "MID": 7,      # 7 days for mid-term signals
+    "LONG": 30     # 30 days for long-term signals
+}
 
 # Initialize data
 if os.path.exists(USER_DATA_FILE):
@@ -71,6 +85,166 @@ async def save_coins_data():
     with open(COINS_FILE, 'w') as f:
         json.dump(coins_data, f)
 
+# Function to parse price values (handle k/K notation)
+def parse_price(price_str):
+    """Convert price string like '88k' or '100K' to numeric value"""
+    if not price_str:
+        return None
+    
+    # Remove any commas or spaces
+    price_str = price_str.replace(',', '').replace(' ', '')
+    
+    # Check if ends with k or K
+    if price_str.lower().endswith('k'):
+        # Remove the 'k' and multiply by 1000
+        try:
+            return float(price_str[:-1]) * 1000
+        except ValueError:
+            return None
+    else:
+        # Just convert to float
+        try:
+            return float(price_str)
+        except ValueError:
+            return None
+
+async def get_historical_price(coin, timestamp):
+    """Get historical price for a coin at a specific timestamp"""
+    try:
+        # Format date for CoinGecko API (UNIX timestamp in seconds)
+        date_obj = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
+        date_unix = int(date_obj.timestamp())
+        
+        # Use CoinGecko API to get historical price
+        coin_id = "bitcoin" if coin.upper() == "BTC" else coin.lower()
+        url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart/range"
+        params = {
+            "vs_currency": "usd",
+            "from": date_unix - 3600,  # 1 hour before
+            "to": date_unix + 3600     # 1 hour after
+        }
+        
+        response = requests.get(url, params=params)
+        data = response.json()
+        
+        if "prices" in data and len(data["prices"]) > 0:
+            # Return the closest price to the timestamp
+            return data["prices"][0][1]  # Price in USD
+        
+        return None
+    except Exception as e:
+        logger.error(f"Error fetching historical price: {e}")
+        return None
+
+async def check_signal_performance(signal):
+    """Check if a signal has hit its target or failed"""
+    if "status" in signal and signal["status"] != PENDING:
+        # Already evaluated
+        return signal
+    
+    coin = signal.get("coin")
+    if not coin:
+        return signal  # Can't evaluate without a coin
+    
+    # Get current price
+    current_price = await get_crypto_price(coin)
+    if not current_price:
+        return signal  # Can't evaluate without current price
+    
+    # Get entry price, target price and stop loss
+    entry_price = parse_price(signal.get("limit_order"))
+    target_price = parse_price(signal.get("take_profit"))
+    
+    # Default stop loss (20% in opposite direction of trade)
+    position = signal.get("position", "Long")
+    stop_loss_pct = 0.2  # 20% default stop loss
+    
+    if entry_price:
+        if position.lower() == "long":
+            # For long positions, stop loss is below entry price
+            stop_loss = entry_price * (1 - stop_loss_pct)
+            # Check if target hit (price went up to target)
+            if target_price and current_price >= target_price:
+                signal["status"] = HIT_TARGET
+                signal["performance"] = ((target_price - entry_price) / entry_price) * 100
+                signal["exit_price"] = target_price
+                signal["exit_date"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            # Check if stop loss hit (price went down to stop loss)
+            elif current_price <= stop_loss:
+                signal["status"] = HIT_STOPLOSS
+                signal["performance"] = ((stop_loss - entry_price) / entry_price) * 100
+                signal["exit_price"] = stop_loss
+                signal["exit_date"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        else:  # Short position
+            # For short positions, stop loss is above entry price
+            stop_loss = entry_price * (1 + stop_loss_pct)
+            # Check if target hit (price went down to target)
+            if target_price and current_price <= target_price:
+                signal["status"] = HIT_TARGET
+                signal["performance"] = ((entry_price - target_price) / entry_price) * 100
+                signal["exit_price"] = target_price
+                signal["exit_date"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            # Check if stop loss hit (price went up to stop loss)
+            elif current_price >= stop_loss:
+                signal["status"] = HIT_STOPLOSS
+                signal["performance"] = ((entry_price - stop_loss) / entry_price) * 100
+                signal["exit_price"] = stop_loss
+                signal["exit_date"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Check for expiration based on timeframe
+    signal_date = datetime.strptime(signal.get("timestamp"), "%Y-%m-%d %H:%M:%S")
+    timeframe = signal.get("timeframe", "MID")
+    expiration_days = TIMEFRAME_DURATIONS.get(timeframe, 7)  # Default to 7 days if timeframe not specified
+    
+    if datetime.now() > signal_date + timedelta(days=expiration_days) and signal.get("status") == PENDING:
+        signal["status"] = EXPIRED
+        # Calculate performance at expiration
+        if entry_price:
+            if position.lower() == "long":
+                signal["performance"] = ((current_price - entry_price) / entry_price) * 100
+            else:  # Short position
+                signal["performance"] = ((entry_price - current_price) / entry_price) * 100
+            signal["exit_price"] = current_price
+            signal["exit_date"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # If still pending, calculate current unrealized performance
+    if signal.get("status") == PENDING and entry_price:
+        if position.lower() == "long":
+            signal["unrealized_performance"] = ((current_price - entry_price) / entry_price) * 100
+        else:  # Short position
+            signal["unrealized_performance"] = ((entry_price - current_price) / entry_price) * 100
+    
+    return signal
+
+async def update_all_signals_performance():
+    """Update performance status for all signals"""
+    updated = False
+    for signal in signals_data["signals"]:
+        # Initialize status if not present
+        if "status" not in signal:
+            signal["status"] = PENDING
+        
+        # Skip signals that are already completed
+        if signal["status"] in [HIT_TARGET, HIT_STOPLOSS, EXPIRED]:
+            continue
+        
+        # Check and update signal performance
+        updated_signal = await check_signal_performance(signal)
+        if updated_signal.get("status") != PENDING:
+            updated = True
+    
+    if updated:
+        await save_signals_data()
+    
+    return updated
+
+async def periodic_signal_check(context: ContextTypes.DEFAULT_TYPE):
+    """Periodically check signal performance"""
+    logger.info("Running periodic signal performance check")
+    updated = await update_all_signals_performance()
+    if updated:
+        logger.info("Signal performances updated")
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /start is issued."""
     user = update.effective_user
@@ -89,15 +263,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     
     # Create keyboard with main commands
     keyboard = [
-        [KeyboardButton("/signals"), KeyboardButton("/coins")],
-        [KeyboardButton("/performance"), KeyboardButton("/help")]
+        [KeyboardButton("/signals"), KeyboardButton("/performance")],
+        [KeyboardButton("/coins"), KeyboardButton("/traders")],
+        [KeyboardButton("/price BTC"), KeyboardButton("/help")]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     
     await update.message.reply_text(
         f"🚀 *Welcome to Pump My Bags Bot!* 🚀\n\n"
-        f"Hi {user.full_name}! I'll forward crypto trading signals from groups where I'm tagged.\n\n"
-        f"📊 Use the buttons below or command menu to navigate:",
+        f"Hi {user.full_name}! I'll forward crypto trading signals from groups where I'm tagged, and track their performance.\n\n"
+        f"📊 Now with *Signal Performance Tracking* to automatically monitor which signals hit their targets!\n\n"
+        f"Use the buttons below to navigate:",
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
@@ -105,11 +281,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Add debug info about bot's username
     my_bot_info = await context.bot.get_me()
     await update.message.reply_text(
-        f"🛠️ *Debug Info*\n\n"
+        f"🛠️ *Bot Info*\n\n"
         f"My username: @{my_bot_info.username}\n"
-        f"To tag me correctly in groups, use: @{my_bot_info.username} $BTC SHORT HIGH your signal text\n\n"
-        f"⚠️ IMPORTANT: Make sure the bot's privacy mode is disabled in BotFather settings.\n"
-        f"If you just added me to a group, you may need to make me an admin or re-add me to the group.",
+        f"To tag me correctly in groups, use: @{my_bot_info.username} Your signal text\n\n"
+        f"Examples:\n"
+        f"• @{my_bot_info.username} Long BTC at 88k, target 97k\n"
+        f"• @{my_bot_info.username} Short BTC at 95k, tp 89k, high risk\n\n",
         parse_mode="Markdown"
     )
 
@@ -284,7 +461,30 @@ async def get_crypto_price(symbol):
         # Remove $ if present and convert to lowercase
         clean_symbol = symbol.replace("$", "").lower()
         
-        # For BTC/ETH/popular coins, try direct request
+        # Common mapping for popular coins
+        coin_mapping = {
+            "btc": "bitcoin",
+            "eth": "ethereum",
+            "ada": "cardano",
+            "bnb": "binancecoin",
+            "sol": "solana",
+            "xrp": "ripple",
+            "doge": "dogecoin",
+            "dot": "polkadot",
+            "avax": "avalanche-2",
+            "shib": "shiba-inu"
+        }
+        
+        # Try with mapping first
+        coin_id = coin_mapping.get(clean_symbol, clean_symbol)
+        url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd"
+        response = requests.get(url)
+        data = response.json()
+        
+        if data and coin_id in data:
+            return data[coin_id]["usd"]
+        
+        # If not found with mapping, try direct ID
         url = f"https://api.coingecko.com/api/v3/simple/price?ids={clean_symbol}&vs_currencies=usd"
         response = requests.get(url)
         data = response.json()
@@ -292,7 +492,7 @@ async def get_crypto_price(symbol):
         if data and clean_symbol in data:
             return data[clean_symbol]["usd"]
         
-        # If not found, try search
+        # If still not found, try search
         search_url = f"https://api.coingecko.com/api/v3/search?query={clean_symbol}"
         search_response = requests.get(search_url)
         search_data = search_response.json()
@@ -406,158 +606,374 @@ async def coins_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 )
 
 async def performance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show signal performance stats"""
-    if not signals_data["signals"]:
-        await update.message.reply_text("No signals have been posted yet to show performance.")
-        return
+    """Show signal performance stats and overall metrics"""
+    # First update all signal performances
+    await update_all_signals_performance()
     
-    # Calculate basic performance metrics
+    # Create keyboard for performance views
+    keyboard = [
+        [InlineKeyboardButton("📈 Signals", callback_data="perf_signals"),
+         InlineKeyboardButton("👨‍💼 Traders", callback_data="perf_traders")],
+        [InlineKeyboardButton("🪙 By Coin", callback_data="perf_coins"),
+         InlineKeyboardButton("⏱️ By Timeframe", callback_data="perf_timeframe")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    # Calculate overall stats
     total_signals = len(signals_data["signals"])
-    coins_mentioned = {}
-    timeframe_counts = {tf: 0 for tf in TIMEFRAMES}
-    risk_counts = {risk: 0 for risk in RISK_LEVELS}
+    pending_count = sum(1 for s in signals_data["signals"] if s.get("status") == PENDING)
+    success_count = sum(1 for s in signals_data["signals"] if s.get("status") == HIT_TARGET)
+    failed_count = sum(1 for s in signals_data["signals"] if s.get("status") == HIT_STOPLOSS)
+    expired_count = sum(1 for s in signals_data["signals"] if s.get("status") == EXPIRED)
     
-    for signal in signals_data["signals"]:
-        # Count coin mentions
-        coin = signal.get("coin", "UNKNOWN")
-        coins_mentioned[coin] = coins_mentioned.get(coin, 0) + 1
-        
-        # Count timeframes
-        timeframe = signal.get("timeframe", "UNKNOWN")
-        if timeframe in TIMEFRAMES:
-            timeframe_counts[timeframe] = timeframe_counts.get(timeframe, 0) + 1
-        
-        # Count risk levels
-        risk = signal.get("risk", "UNKNOWN")
-        if risk in RISK_LEVELS:
-            risk_counts[risk] = risk_counts.get(risk, 0) + 1
+    # Calculate success rate
+    completed_count = success_count + failed_count + expired_count
+    success_rate = (success_count / completed_count * 100) if completed_count > 0 else 0
     
-    # Sort coins by mention count
-    top_coins = sorted(coins_mentioned.items(), key=lambda x: x[1], reverse=True)[:5]
+    # Calculate average performance
+    performances = [s.get("performance", 0) for s in signals_data["signals"] 
+                    if "performance" in s and s.get("status") != PENDING]
+    avg_performance = sum(performances) / len(performances) if performances else 0
     
-    # Create performance message
+    # Build performance summary
     performance_text = (
-        f"📊 *Signal Performance Stats* 📊\n\n"
-        f"*Total Signals:* {total_signals}\n\n"
-        f"*Most Mentioned Coins:*\n"
+        f"📊 *Signal Performance Summary* 📊\n\n"
+        f"*Total Signals:* {total_signals}\n"
+        f"*Pending:* {pending_count}\n"
+        f"*Successful:* {success_count}\n"
+        f"*Failed:* {failed_count}\n"
+        f"*Expired:* {expired_count}\n\n"
+        f"*Success Rate:* {success_rate:.1f}%\n"
+        f"*Average Return:* {avg_performance:.2f}%\n\n"
+        f"*Select a detailed view:*"
     )
     
-    for coin, count in top_coins:
-        performance_text += f"• {coin}: {count} signals\n"
-    
-    performance_text += f"\n*By Timeframe:*\n"
-    for tf, count in timeframe_counts.items():
-        if count > 0:
-            performance_text += f"• {tf}: {count} signals\n"
-    
-    performance_text += f"\n*By Risk Level:*\n"
-    for risk, count in risk_counts.items():
-        if count > 0:
-            performance_text += f"• {risk}: {count} signals\n"
-    
-    await update.message.reply_text(performance_text, parse_mode="Markdown")
+    await update.message.reply_text(
+        performance_text,
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
 
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle button callbacks."""
+async def handle_performance_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle callback for different performance views"""
     query = update.callback_query
     await query.answer()
     
-    data = query.data
-    chat_id = str(query.message.chat_id)
+    callback_data = query.data
     
-    if data == "add_coins":
+    if callback_data == "perf_traders":
+        # Show trader performance
+        # Get stats by trader
+        trader_stats = {}
+        
+        # Only consider signals with final status
+        completed_signals = [s for s in signals_data["signals"] 
+                            if s.get("status") in [HIT_TARGET, HIT_STOPLOSS, EXPIRED]]
+        
+        if not completed_signals:
+            await query.edit_message_text("No completed signals yet to show trader performance stats.")
+            return
+        
+        for signal in completed_signals:
+            trader = signal.get("sender", "Unknown")
+            
+            if trader not in trader_stats:
+                trader_stats[trader] = {
+                    "total_signals": 0,
+                    "success_count": 0,
+                    "failure_count": 0,
+                    "expired_count": 0,
+                    "total_profit": 0,
+                    "avg_profit": 0
+                }
+            
+            # Update counts
+            trader_stats[trader]["total_signals"] += 1
+            
+            if signal.get("status") == HIT_TARGET:
+                trader_stats[trader]["success_count"] += 1
+            elif signal.get("status") == HIT_STOPLOSS:
+                trader_stats[trader]["failure_count"] += 1
+            elif signal.get("status") == EXPIRED:
+                trader_stats[trader]["expired_count"] += 1
+            
+            # Add profit/loss percentage
+            if "performance" in signal:
+                trader_stats[trader]["total_profit"] += signal["performance"]
+        
+        # Calculate averages and success rates
+        for trader, stats in trader_stats.items():
+            if stats["total_signals"] > 0:
+                stats["avg_profit"] = stats["total_profit"] / stats["total_signals"]
+                stats["success_rate"] = (stats["success_count"] / stats["total_signals"]) * 100
+        
+        # Sort traders by success rate
+        sorted_traders = sorted(
+            trader_stats.items(), 
+            key=lambda x: (x[1]["success_rate"], x[1]["avg_profit"]), 
+            reverse=True
+        )
+        
+        # Create trader performance report
+        report = "👨‍💼 *Trader Performance* 👨‍💼\n\n"
+        
+        for i, (trader, stats) in enumerate(sorted_traders[:5], 1):  # Show top 5
+            report += (
+                f"*{i}. {trader}*\n"
+                f"Success Rate: {stats['success_rate']:.1f}%\n"
+                f"Signals: {stats['total_signals']} "
+                f"(✅{stats['success_count']} "
+                f"❌{stats['failure_count']} "
+                f"⏳{stats['expired_count']})\n"
+                f"Avg Profit: {stats['avg_profit']:.2f}%\n\n"
+            )
+        
+        # Add back button
+        keyboard = [[InlineKeyboardButton("◀️ Back", callback_data="perf_back")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
         await query.edit_message_text(
-            "To add a coin to your favorites, use:\n"
-            "/coins BTC\n\n"
-            "Replace BTC with any cryptocurrency symbol."
+            report,
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
         )
     
-    elif data == "remove_coins":
-        if chat_id in user_data["users"] and "favorite_coins" in user_data["users"][chat_id]:
-            coins = user_data["users"][chat_id]["favorite_coins"]
-            if not coins:
-                await query.edit_message_text("You don't have any favorite coins to remove.")
-                return
-            
-            # Create keyboard with all coins to remove
-            keyboard = []
-            row = []
-            for i, coin in enumerate(coins):
-                row.append(InlineKeyboardButton(coin, callback_data=f"remove_{coin}"))
-                if (i + 1) % 3 == 0 or i == len(coins) - 1:
-                    keyboard.append(row)
-                    row = []
-            
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await query.edit_message_text(
-                "Select a coin to remove from favorites:",
-                reply_markup=reply_markup
-            )
-        else:
-            await query.edit_message_text("You don't have any favorite coins yet.")
-    
-    elif data.startswith("remove_"):
-        coin = data.split("_")[1]
-        if chat_id in user_data["users"] and "favorite_coins" in user_data["users"][chat_id]:
-            if coin in user_data["users"][chat_id]["favorite_coins"]:
-                user_data["users"][chat_id]["favorite_coins"].remove(coin)
-                await save_user_data()
-                await query.edit_message_text(f"Removed {coin} from your favorite coins!")
-            else:
-                await query.edit_message_text(f"{coin} is not in your favorites.")
-        else:
-            await query.edit_message_text("You don't have any favorite coins yet.")
-    
-    elif data.startswith("vote_"):
-        # Handle signal voting
-        parts = data.split("_")
-        signal_id = parts[1]
-        vote_type = parts[2]  # "up" or "down"
+    elif callback_data == "perf_coins":
+        # Show performance by coin
+        coin_stats = {}
         
+        # Collect data by coin
         for signal in signals_data["signals"]:
-            if str(signal["id"]) == signal_id:
-                # Check if user already voted
-                if "voters" not in signal:
-                    signal["voters"] = {}
-                
-                prev_vote = signal["voters"].get(chat_id)
-                
-                # Update votes
-                if vote_type == "up":
-                    if prev_vote == "up":
-                        # Removing upvote
-                        signal["upvotes"] -= 1
-                        del signal["voters"][chat_id]
-                    else:
-                        # Adding upvote
-                        signal["upvotes"] += 1
-                        if prev_vote == "down":
-                            signal["downvotes"] -= 1
-                        signal["voters"][chat_id] = "up"
-                elif vote_type == "down":
-                    if prev_vote == "down":
-                        # Removing downvote
-                        signal["downvotes"] -= 1
-                        del signal["voters"][chat_id]
-                    else:
-                        # Adding downvote
-                        signal["downvotes"] += 1
-                        if prev_vote == "up":
-                            signal["upvotes"] -= 1
-                        signal["voters"][chat_id] = "down"
-                
-                # Update the keyboard with new vote counts
-                keyboard = [
-                    [
-                        InlineKeyboardButton(f"👍 {signal['upvotes']}", callback_data=f"vote_{signal_id}_up"),
-                        InlineKeyboardButton(f"👎 {signal['downvotes']}", callback_data=f"vote_{signal_id}_down")
-                    ]
-                ]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                
-                await query.edit_message_reply_markup(reply_markup=reply_markup)
-                await save_signals_data()
-                break
+            coin = signal.get("coin", "Unknown")
+            
+            if coin not in coin_stats:
+                coin_stats[coin] = {
+                    "total_signals": 0,
+                    "success_count": 0,
+                    "failure_count": 0,
+                    "expired_count": 0,
+                    "pending_count": 0,
+                    "total_profit": 0
+                }
+            
+            coin_stats[coin]["total_signals"] += 1
+            
+            if signal.get("status") == HIT_TARGET:
+                coin_stats[coin]["success_count"] += 1
+                if "performance" in signal:
+                    coin_stats[coin]["total_profit"] += signal["performance"]
+            elif signal.get("status") == HIT_STOPLOSS:
+                coin_stats[coin]["failure_count"] += 1
+                if "performance" in signal:
+                    coin_stats[coin]["total_profit"] += signal["performance"]
+            elif signal.get("status") == EXPIRED:
+                coin_stats[coin]["expired_count"] += 1
+                if "performance" in signal:
+                    coin_stats[coin]["total_profit"] += signal["performance"]
+            else:  # PENDING
+                coin_stats[coin]["pending_count"] += 1
+        
+        # Calculate average profit and success rate for each coin
+        for coin, stats in coin_stats.items():
+            completed = stats["success_count"] + stats["failure_count"] + stats["expired_count"]
+            stats["completed_signals"] = completed
+            
+            if completed > 0:
+                stats["success_rate"] = (stats["success_count"] / completed) * 100
+                stats["avg_profit"] = stats["total_profit"] / completed
+            else:
+                stats["success_rate"] = 0
+                stats["avg_profit"] = 0
+        
+        # Sort coins by number of signals
+        sorted_coins = sorted(
+            coin_stats.items(),
+            key=lambda x: x[1]["total_signals"],
+            reverse=True
+        )
+        
+        # Create coin performance report
+        report = "🪙 *Performance by Coin* 🪙\n\n"
+        
+        for coin, stats in sorted_coins[:10]:  # Show top 10 coins
+            if stats["completed_signals"] > 0:
+                report += (
+                    f"*{coin}*\n"
+                    f"Signals: {stats['total_signals']} "
+                    f"(✅{stats['success_count']} "
+                    f"❌{stats['failure_count']} "
+                    f"⏳{stats['expired_count']} "
+                    f"⏱️{stats['pending_count']})\n"
+                    f"Success Rate: {stats['success_rate']:.1f}%\n"
+                    f"Avg Profit: {stats['avg_profit']:.2f}%\n\n"
+                )
+        
+        # Add back button
+        keyboard = [[InlineKeyboardButton("◀️ Back", callback_data="perf_back")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            report,
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
+        )
+    
+    elif callback_data == "perf_timeframe":
+        # Show performance by timeframe
+        timeframe_stats = {tf: {"total": 0, "success": 0, "failure": 0, "expired": 0, "profit": 0} 
+                         for tf in TIMEFRAMES}
+        
+        # Collect data by timeframe
+        for signal in signals_data["signals"]:
+            timeframe = signal.get("timeframe", "MID")  # Default to MID if not specified
+            
+            if timeframe not in timeframe_stats:
+                timeframe_stats[timeframe] = {"total": 0, "success": 0, "failure": 0, "expired": 0, "profit": 0}
+            
+            timeframe_stats[timeframe]["total"] += 1
+            
+            if signal.get("status") == HIT_TARGET:
+                timeframe_stats[timeframe]["success"] += 1
+                if "performance" in signal:
+                    timeframe_stats[timeframe]["profit"] += signal["performance"]
+            elif signal.get("status") == HIT_STOPLOSS:
+                timeframe_stats[timeframe]["failure"] += 1
+                if "performance" in signal:
+                    timeframe_stats[timeframe]["profit"] += signal["performance"]
+            elif signal.get("status") == EXPIRED:
+                timeframe_stats[timeframe]["expired"] += 1
+                if "performance" in signal:
+                    timeframe_stats[timeframe]["profit"] += signal["performance"]
+        
+        # Calculate success rates and average profits
+        for tf, stats in timeframe_stats.items():
+            completed = stats["success"] + stats["failure"] + stats["expired"]
+            if completed > 0:
+                stats["success_rate"] = (stats["success"] / completed) * 100
+                stats["avg_profit"] = stats["profit"] / completed
+            else:
+                stats["success_rate"] = 0
+                stats["avg_profit"] = 0
+        
+        # Create timeframe performance report
+        report = "⏱️ *Performance by Timeframe* ⏱️\n\n"
+        
+        for tf, stats in timeframe_stats.items():
+            if stats["total"] > 0:
+                report += (
+                    f"*{tf} Timeframe*\n"
+                    f"Total Signals: {stats['total']}\n"
+                    f"Success Rate: {stats['success_rate']:.1f}%\n"
+                    f"Avg Profit: {stats['avg_profit']:.2f}%\n"
+                    f"✅ {stats['success']} | ❌ {stats['failure']} | ⏳ {stats['expired']}\n\n"
+                )
+        
+        # Add back button
+        keyboard = [[InlineKeyboardButton("◀️ Back", callback_data="perf_back")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            report,
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
+        )
+        
+    elif callback_data == "perf_signals":
+        # Show recent signal performances
+        # First update all signal statuses
+        await update_all_signals_performance()
+        
+        # Get recent signals that have completed
+        completed_signals = [s for s in signals_data["signals"] 
+                            if s.get("status") != PENDING]
+        
+        # Sort by timestamp (most recent first)
+        sorted_signals = sorted(
+            completed_signals,
+            key=lambda x: datetime.strptime(x.get("timestamp", "2000-01-01 00:00:00"), "%Y-%m-%d %H:%M:%S"),
+            reverse=True
+        )
+        
+        if not sorted_signals:
+            await query.edit_message_text(
+                "No completed signals yet to show performance.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Back", callback_data="perf_back")]])
+            )
+            return
+        
+        # Create signal performance report
+        report = "📈 *Recent Signal Results* 📈\n\n"
+        
+        for signal in sorted_signals[:5]:  # Show 5 most recent completed signals
+            status_emoji = "✅" if signal.get("status") == HIT_TARGET else "❌" if signal.get("status") == HIT_STOPLOSS else "⏳"
+            position = signal.get("position", "Unknown")
+            coin = signal.get("coin", "Unknown")
+            perf = signal.get("performance", 0)
+            perf_str = f"+{perf:.2f}%" if perf >= 0 else f"{perf:.2f}%"
+            
+            report += (
+                f"*{status_emoji} {position} {coin}*\n"
+                f"Entry: {signal.get('limit_order', 'Unknown')}\n"
+                f"Target: {signal.get('take_profit', 'Unknown')}\n"
+                f"Result: {perf_str}\n"
+                f"From: {signal.get('sender', 'Unknown')}\n"
+                f"Date: {signal.get('timestamp', 'Unknown')}\n\n"
+            )
+        
+        # Add back button
+        keyboard = [[InlineKeyboardButton("◀️ Back", callback_data="perf_back")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            report,
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
+        )
+    
+    elif callback_data == "perf_back":
+        # Go back to main performance menu
+        keyboard = [
+            [InlineKeyboardButton("📈 Signals", callback_data="perf_signals"),
+             InlineKeyboardButton("👨‍💼 Traders", callback_data="perf_traders")],
+            [InlineKeyboardButton("🪙 By Coin", callback_data="perf_coins"),
+             InlineKeyboardButton("⏱️ By Timeframe", callback_data="perf_timeframe")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # Calculate overall stats
+        total_signals = len(signals_data["signals"])
+        pending_count = sum(1 for s in signals_data["signals"] if s.get("status") == PENDING)
+        success_count = sum(1 for s in signals_data["signals"] if s.get("status") == HIT_TARGET)
+        failed_count = sum(1 for s in signals_data["signals"] if s.get("status") == HIT_STOPLOSS)
+        expired_count = sum(1 for s in signals_data["signals"] if s.get("status") == EXPIRED)
+        
+        # Calculate success rate
+        completed_count = success_count + failed_count + expired_count
+        success_rate = (success_count / completed_count * 100) if completed_count > 0 else 0
+        
+        # Calculate average performance
+        performances = [s.get("performance", 0) for s in signals_data["signals"] 
+                        if "performance" in s and s.get("status") != PENDING]
+        avg_performance = sum(performances) / len(performances) if performances else 0
+        
+        # Build performance summary
+        performance_text = (
+            f"📊 *Signal Performance Summary* 📊\n\n"
+            f"*Total Signals:* {total_signals}\n"
+            f"*Pending:* {pending_count}\n"
+            f"*Successful:* {success_count}\n"
+            f"*Failed:* {failed_count}\n"
+            f"*Expired:* {expired_count}\n\n"
+            f"*Success Rate:* {success_rate:.1f}%\n"
+            f"*Average Return:* {avg_performance:.2f}%\n\n"
+            f"*Select a detailed view:*"
+        )
+        
+        await query.edit_message_text(
+            performance_text,
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
+        )
 
 async def signals_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show recent signals to the user."""
@@ -941,6 +1357,180 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     else:
         logger.debug(f"Message not in a group: {chat_type}")
 
+async def trader_performance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show performance statistics for traders"""
+    # Run update before showing stats
+    await update_all_signals_performance()
+    
+    # Get stats by trader
+    trader_stats = {}
+    
+    # Only consider signals with final status
+    completed_signals = [s for s in signals_data["signals"] 
+                         if s.get("status") in [HIT_TARGET, HIT_STOPLOSS, EXPIRED]]
+    
+    if not completed_signals:
+        await update.message.reply_text("No completed signals yet to show performance stats.")
+        return
+    
+    for signal in completed_signals:
+        trader = signal.get("sender", "Unknown")
+        
+        if trader not in trader_stats:
+            trader_stats[trader] = {
+                "total_signals": 0,
+                "success_count": 0,
+                "failure_count": 0,
+                "expired_count": 0,
+                "total_profit": 0,
+                "avg_profit": 0
+            }
+        
+        # Update counts
+        trader_stats[trader]["total_signals"] += 1
+        
+        if signal.get("status") == HIT_TARGET:
+            trader_stats[trader]["success_count"] += 1
+        elif signal.get("status") == HIT_STOPLOSS:
+            trader_stats[trader]["failure_count"] += 1
+        elif signal.get("status") == EXPIRED:
+            trader_stats[trader]["expired_count"] += 1
+        
+        # Add profit/loss percentage
+        if "performance" in signal:
+            trader_stats[trader]["total_profit"] += signal["performance"]
+    
+    # Calculate averages and success rates
+    for trader, stats in trader_stats.items():
+        if stats["total_signals"] > 0:
+            stats["avg_profit"] = stats["total_profit"] / stats["total_signals"]
+            stats["success_rate"] = (stats["success_count"] / stats["total_signals"]) * 100
+    
+    # Sort traders by success rate
+    sorted_traders = sorted(
+        trader_stats.items(), 
+        key=lambda x: (x[1]["success_rate"], x[1]["avg_profit"]), 
+        reverse=True
+    )
+    
+    # Create performance report
+    report = "📊 *Trader Performance Stats* 📊\n\n"
+    
+    for i, (trader, stats) in enumerate(sorted_traders[:10], 1):  # Show top 10
+        report += (
+            f"*{i}. {trader}*\n"
+            f"Success Rate: {stats['success_rate']:.1f}%\n"
+            f"Signals: {stats['total_signals']} "
+            f"(✅{stats['success_count']} "
+            f"❌{stats['failure_count']} "
+            f"⏳{stats['expired_count']})\n"
+            f"Avg Profit: {stats['avg_profit']:.2f}%\n\n"
+        )
+    
+    await update.message.reply_text(report, parse_mode="Markdown")
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle button callbacks."""
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    chat_id = str(query.message.chat_id)
+    
+    if data == "add_coins":
+        await query.edit_message_text(
+            "To add a coin to your favorites, use:\n"
+            "/coins BTC\n\n"
+            "Replace BTC with any cryptocurrency symbol."
+        )
+    
+    elif data == "remove_coins":
+        if chat_id in user_data["users"] and "favorite_coins" in user_data["users"][chat_id]:
+            coins = user_data["users"][chat_id]["favorite_coins"]
+            if not coins:
+                await query.edit_message_text("You don't have any favorite coins to remove.")
+                return
+            
+            # Create keyboard with all coins to remove
+            keyboard = []
+            row = []
+            for i, coin in enumerate(coins):
+                row.append(InlineKeyboardButton(coin, callback_data=f"remove_{coin}"))
+                if (i + 1) % 3 == 0 or i == len(coins) - 1:
+                    keyboard.append(row)
+                    row = []
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(
+                "Select a coin to remove from favorites:",
+                reply_markup=reply_markup
+            )
+        else:
+            await query.edit_message_text("You don't have any favorite coins yet.")
+    
+    elif data.startswith("remove_"):
+        coin = data.split("_")[1]
+        if chat_id in user_data["users"] and "favorite_coins" in user_data["users"][chat_id]:
+            if coin in user_data["users"][chat_id]["favorite_coins"]:
+                user_data["users"][chat_id]["favorite_coins"].remove(coin)
+                await save_user_data()
+                await query.edit_message_text(f"Removed {coin} from your favorite coins!")
+            else:
+                await query.edit_message_text(f"{coin} is not in your favorites.")
+        else:
+            await query.edit_message_text("You don't have any favorite coins yet.")
+    
+    elif data.startswith("vote_"):
+        # Handle signal voting
+        parts = data.split("_")
+        signal_id = parts[1]
+        vote_type = parts[2]  # "up" or "down"
+        
+        for signal in signals_data["signals"]:
+            if str(signal["id"]) == signal_id:
+                # Check if user already voted
+                if "voters" not in signal:
+                    signal["voters"] = {}
+                
+                prev_vote = signal["voters"].get(chat_id)
+                
+                # Update votes
+                if vote_type == "up":
+                    if prev_vote == "up":
+                        # Removing upvote
+                        signal["upvotes"] -= 1
+                        del signal["voters"][chat_id]
+                    else:
+                        # Adding upvote
+                        signal["upvotes"] += 1
+                        if prev_vote == "down":
+                            signal["downvotes"] -= 1
+                        signal["voters"][chat_id] = "up"
+                elif vote_type == "down":
+                    if prev_vote == "down":
+                        # Removing downvote
+                        signal["downvotes"] -= 1
+                        del signal["voters"][chat_id]
+                    else:
+                        # Adding downvote
+                        signal["downvotes"] += 1
+                        if prev_vote == "up":
+                            signal["upvotes"] -= 1
+                        signal["voters"][chat_id] = "down"
+                
+                # Update the keyboard with new vote counts
+                keyboard = [
+                    [
+                        InlineKeyboardButton(f"👍 {signal['upvotes']}", callback_data=f"vote_{signal_id}_up"),
+                        InlineKeyboardButton(f"👎 {signal['downvotes']}", callback_data=f"vote_{signal_id}_down")
+                    ]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                await query.edit_message_reply_markup(reply_markup=reply_markup)
+                await save_signals_data()
+                break
+
 def main() -> None:
     """Start the bot."""
     if not BOT_TOKEN:
@@ -966,8 +1556,16 @@ def main() -> None:
     # Add callback query handler for button interactions
     application.add_handler(CallbackQueryHandler(button_callback))
     
+    # Add callback handler for performance-specific buttons
+    for pattern in ["perf_signals", "perf_traders", "perf_coins", "perf_timeframe", "perf_back"]:
+        application.add_handler(CallbackQueryHandler(handle_performance_callback, pattern=pattern))
+    
     # Add message handler for group messages that tag the bot
     application.add_handler(MessageHandler(filters.ChatType.GROUPS, handle_message))
+    
+    # Add periodic job to check signal performance
+    job_queue = application.job_queue
+    job_queue.run_repeating(periodic_signal_check, interval=3600, first=10)  # Check every hour
     
     # Start the Bot
     application.run_polling(allowed_updates=Update.ALL_TYPES)
