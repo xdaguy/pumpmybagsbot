@@ -1,439 +1,345 @@
-from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
+from datetime import datetime
+from collections import Counter
 
 from src.config import user_data, signals_data, coins_data, logger, TIMEFRAMES, RISK_LEVELS, PENDING, HIT_TARGET, HIT_STOPLOSS, EXPIRED
-from src.services.price_service import get_crypto_price
-from src.services.signal_processor import update_all_signals_performance
-from src.services.data_handlers import save_user_data, save_signals_data, save_coins_data
+from src.services.data_handlers import save_user_data, save_signals_data
+from src.services.price_service import get_crypto_price, parse_price
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send a message when the command /start is issued."""
+    """Send a welcome message when the command /start is issued."""
     user = update.effective_user
+    user_id = str(user.id)
     chat_id = update.effective_chat.id
     
-    if str(chat_id) not in user_data["users"]:
-        user_data["users"][str(chat_id)] = {
-            "name": user.full_name,
+    # Add user to user_data if not exists
+    if user_id not in user_data["users"]:
+        user_data["users"][user_id] = {
+            "user_id": user_id,
             "username": user.username,
             "chat_id": chat_id,
-            "subscribed": True,
-            "joined_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "subscribed": False,
             "favorite_coins": []
         }
-        
-        # Add to subscribers list if not already there
-        if "subscribers" not in user_data:
-            user_data["subscribers"] = []
-        if str(chat_id) not in user_data["subscribers"]:
-            user_data["subscribers"].append(str(chat_id))
-            
         await save_user_data()
-        
-        await update.message.reply_text(
-            f"👋 Hello {user.full_name}! Welcome to Pump My Bags Bot!\n\n"
-            f"I'll forward crypto trading signals to you when tagged in groups.\n\n"
-            f"Use /help to see all available commands."
-        )
-    else:
-        await update.message.reply_text(
-            f"Welcome back {user.full_name}! You're already subscribed to signals.\n\n"
-            f"Use /help to see all available commands."
-        )
+    
+    welcome_message = (
+        f"👋 Hello {user.first_name}!\n\n"
+        f"I'm PumpMyBagsBot, your assistant for tracking crypto trading signals.\n\n"
+        f"*Commands:*\n"
+        f"/subscribe - Subscribe to signal notifications\n"
+        f"/unsubscribe - Unsubscribe from notifications\n"
+        f"/signals - Show recent signals\n"
+        f"/price <coin> - Check current price of a coin\n"
+        f"/coins - View and manage your favorite coins\n"
+        f"/stat - View signal statistics\n"
+        f"/settings - Configure your notification preferences\n"
+        f"/help - Show this help message\n\n"
+        f"Tag me in a message or use /s to share a trading signal!"
+    )
+    
+    await update.message.reply_text(welcome_message, parse_mode="Markdown")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send a message when the command /help is issued."""
-    help_text = (
-        "🤖 *Pump My Bags Bot Commands* 🤖\n\n"
-        
-        "*Basic Commands:*\n"
-        "/start - Start the bot and subscribe to signals\n"
-        "/help - Show this help message\n"
-        "/subscribe - Subscribe to signals\n"
-        "/unsubscribe - Unsubscribe from signals\n\n"
-        
-        "*Signal Commands:*\n"
-        "/signals - Show recent signals\n"
-        "/performance - View signal performance stats\n\n"
-        
-        "*Coin Commands:*\n"
-        "/price BTC - Check current price of a coin\n"
-        "/coins BTC - Add/remove coins from favorites\n\n"
-        
-        "*Settings & Stats:*\n"
-        "/settings - Configure notification preferences\n"
-        "/stat - View bot usage statistics\n\n"
-        
-        "*How to use in groups:*\n"
-        "Tag me in a group message with a coin symbol to create a signal:\n"
-        "@PumpMyBagsBot $BTC Buy at 80k, target 100k\n\n"
-        
-        "⚠️ *DISCLAIMER:* Trading involves risk. Do your own research."
+    """Send a help message when the command /help is issued."""
+    help_message = (
+        f"*PumpMyBagsBot Commands:*\n\n"
+        f"/subscribe - Subscribe to signal notifications\n"
+        f"/unsubscribe - Unsubscribe from notifications\n"
+        f"/signals - Show recent signals\n"
+        f"/price <coin> - Check current price of a coin\n"
+        f"/coins - View and manage your favorite coins\n"
+        f"/stat - View signal statistics\n"
+        f"/settings - Configure your notification preferences\n"
+        f"/help - Show this help message\n\n"
+        f"*Sharing signals:*\n"
+        f"1. Tag me in a message: @pumpmybagsbot\n"
+        f"2. Use the /s command followed by your signal\n\n"
+        f"*Example signals:*\n"
+        f"`@pumpmybagsbot short btc at 85k, tp1 is 84k, tp2 is 83k, risk is low.`\n\n"
+        f"`/s long eth at 2210, tp is 2500, high risk, long frame`"
     )
     
-    await update.message.reply_text(help_text, parse_mode="Markdown")
+    await update.message.reply_text(help_message, parse_mode="Markdown")
 
 async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Subscribe to signals"""
+    """Subscribe user to signal notifications."""
     user = update.effective_user
+    user_id = str(user.id)
     chat_id = update.effective_chat.id
     
-    if str(chat_id) not in user_data["users"]:
-        user_data["users"][str(chat_id)] = {
-            "name": user.full_name,
+    # Add user to user_data if not exists
+    if user_id not in user_data["users"]:
+        user_data["users"][user_id] = {
+            "user_id": user_id,
             "username": user.username,
             "chat_id": chat_id,
             "subscribed": True,
-            "joined_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "favorite_coins": []
         }
+        await save_user_data()
+        await update.message.reply_text("✅ You are now subscribed to signal notifications!")
     else:
-        user_data["users"][str(chat_id)]["subscribed"] = True
-    
-    # Add to subscribers list if not already there
-    if "subscribers" not in user_data:
-        user_data["subscribers"] = []
-    if str(chat_id) not in user_data["subscribers"]:
-        user_data["subscribers"].append(str(chat_id))
-    
-    await save_user_data()
-    
-    await update.message.reply_text(
-        f"✅ You are now subscribed to trading signals!\n\n"
-        f"You'll receive notifications when new signals are posted."
-    )
+        # Update subscription status
+        if user_data["users"][user_id].get("subscribed", False):
+            await update.message.reply_text("ℹ️ You are already subscribed to signal notifications.")
+        else:
+            user_data["users"][user_id]["subscribed"] = True
+            user_data["users"][user_id]["chat_id"] = chat_id  # Update chat_id in case it changed
+            await save_user_data()
+            await update.message.reply_text("✅ You are now subscribed to signal notifications!")
 
 async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Unsubscribe from signals"""
-    chat_id = update.effective_chat.id
+    """Unsubscribe user from signal notifications."""
+    user = update.effective_user
+    user_id = str(user.id)
     
-    if str(chat_id) in user_data["users"]:
-        user_data["users"][str(chat_id)]["subscribed"] = False
-        
-        # Remove from subscribers list
-        if "subscribers" in user_data and str(chat_id) in user_data["subscribers"]:
-            user_data["subscribers"].remove(str(chat_id))
-        
+    if user_id in user_data["users"]:
+        user_data["users"][user_id]["subscribed"] = False
         await save_user_data()
-        
-        await update.message.reply_text(
-            f"❌ You have unsubscribed from trading signals.\n\n"
-            f"You won't receive any more notifications. Use /subscribe to resubscribe."
-        )
+        await update.message.reply_text("✅ You have been unsubscribed from signal notifications.")
     else:
-        await update.message.reply_text(
-            f"You weren't subscribed to begin with. Use /subscribe to subscribe."
-        )
-
-async def price_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Get current price of a cryptocurrency"""
-    if not context.args:
-        await update.message.reply_text(
-            "Please specify a coin symbol. Example: /price BTC"
-        )
-        return
-    
-    coin = context.args[0].upper()
-    price = await get_crypto_price(coin)
-    
-    if price:
-        await update.message.reply_text(
-            f"💰 *{coin} Price*: ${price:,.2f} USD",
-            parse_mode="Markdown"
-        )
-    else:
-        await update.message.reply_text(
-            f"❌ Couldn't find price for {coin}. Please check the symbol and try again."
-        )
+        await update.message.reply_text("ℹ️ You are not currently subscribed.")
 
 async def signals_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show recent signals"""
-    # Update signal performance before showing
-    await update_all_signals_performance()
-    
-    # Get the 5 most recent signals
-    recent_signals = sorted(signals_data["signals"], key=lambda x: x.get("id", 0), reverse=True)[:5]
+    """Show recent signals."""
+    # Get the most recent 5 signals
+    recent_signals = signals_data["signals"][-5:] if signals_data["signals"] else []
     
     if not recent_signals:
         await update.message.reply_text("No signals found yet.")
         return
     
-    # Send a header message
-    header = "📊 *Recent Trading Signals* 📊\n\nHere are the last 5 signals:\n"
-    await update.message.reply_text(header, parse_mode="Markdown")
+    # Create header for signals
+    header = "*Recent Trading Signals:*\n\n"
     
-    # Send each signal as a separate message with vote buttons
-    for signal in recent_signals:
-        signal_id = signal.get("id")
+    # Create individual signal messages
+    signal_messages = []
+    for i, signal in enumerate(recent_signals, 1):
         coin = signal.get("coin", "Unknown")
-        sender = signal.get("sender", "Unknown")
-        timestamp = signal.get("timestamp", "Unknown")
+        position = signal.get("position", "Unknown")
+        entry = signal.get("limit_order", "Unknown")
+        tp = signal.get("take_profit", "Unknown")
         status = signal.get("status", PENDING)
+        date = signal.get("timestamp", "Unknown date")
         
-        # Get current price
-        current_price = None
-        if coin:
-            current_price = await get_crypto_price(coin)
-        
-        # Format status with emoji
-        status_emoji = "⏳"
-        if status == HIT_TARGET:
-            status_emoji = "✅"
-        elif status == HIT_STOPLOSS:
-            status_emoji = "❌"
-        elif status == EXPIRED:
-            status_emoji = "⏰"
-        
-        # Create vote buttons
-        keyboard = [
-            [
-                InlineKeyboardButton(f"👍 {signal.get('upvotes', 0)}", callback_data=f"vote_{signal_id}_up"),
-                InlineKeyboardButton(f"👎 {signal.get('downvotes', 0)}", callback_data=f"vote_{signal_id}_down")
-            ]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        # Add status emoji
+        status_emoji = "✅" if status == HIT_TARGET else "❌" if status == HIT_STOPLOSS else "⏰" if status == EXPIRED else "🔍"
         
         # Format message
-        message = f"*Signal #{signal_id}*\n\n"
+        signal_msg = (
+            f"*Signal {i}:*\n"
+            f"{status_emoji} {position} {coin} at {entry}\n"
+            f"Target: {tp}\n"
+            f"Status: {status}\n"
+            f"Added: {date}\n"
+        )
         
-        if coin:
-            message += f"*Coin:* {coin}\n"
-            if current_price:
-                message += f"*Current Price:* ${current_price:,.2f}\n"
-        
-        if "limit_order" in signal:
-            position = signal.get("position", "Long")
-            if position.lower() == "short":
-                message += f"*Limit Order:* Sell at {signal['limit_order']}\n"
-            else:
-                message += f"*Limit Order:* Buy at {signal['limit_order']}\n"
-        
-        if "take_profit" in signal:
-            message += f"*TP:* {signal['take_profit']}\n"
-        
-        if "position" in signal:
-            message += f"*Position:* {signal['position']}\n"
-        
-        if "timeframe" in signal:
-            message += f"*Timeframe:* {signal['timeframe']}\n"
-        
-        if "risk" in signal:
-            message += f"*Risk:* {signal['risk']}\n"
-        
-        message += f"*Status:* {status_emoji} {status}\n"
-        
-        if "performance" in signal:
+        # Add performance if available
+        if "performance" in signal and status != PENDING:
             perf = signal["performance"]
             perf_sign = "+" if perf >= 0 else ""
-            message += f"*Performance:* {perf_sign}{perf:.2f}%\n"
-        elif "unrealized_performance" in signal:
+            signal_msg += f"Performance: {perf_sign}{perf:.2f}%\n"
+        elif "unrealized_performance" in signal and status == PENDING:
             perf = signal["unrealized_performance"]
             perf_sign = "+" if perf >= 0 else ""
-            message += f"*Unrealized P/L:* {perf_sign}{perf:.2f}%\n"
+            signal_msg += f"Current: {perf_sign}{perf:.2f}%\n"
         
-        message += f"\n*From:* {signal.get('sender', 'Unknown')}\n"
-        message += f"*Time:* {timestamp}\n"
-        
-        await update.message.reply_text(
-            message,
-            reply_markup=reply_markup,
-            parse_mode="Markdown"
-        )
+        signal_messages.append(signal_msg)
+    
+    # Combine all messages
+    full_message = header + "\n".join(signal_messages)
+    
+    await update.message.reply_text(full_message, parse_mode="Markdown")
 
-async def performance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show signal performance stats and overall metrics"""
-    # First update all signal performances
-    await update_all_signals_performance()
+async def price_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Get current price of a cryptocurrency."""
+    if not context.args:
+        await update.message.reply_text("Please provide a coin symbol. Example: /price btc")
+        return
     
-    # Create keyboard for performance views
-    keyboard = [
-        [InlineKeyboardButton("📈 Signals", callback_data="perf_signals"),
-         InlineKeyboardButton("👨‍💼 Traders", callback_data="perf_traders")],
-        [InlineKeyboardButton("🪙 By Coin", callback_data="perf_coins"),
-         InlineKeyboardButton("⏱️ By Timeframe", callback_data="perf_timeframe")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    coin = context.args[0].upper()
     
-    # Calculate overall stats
-    total_signals = len(signals_data["signals"])
-    pending_count = sum(1 for s in signals_data["signals"] if s.get("status") == PENDING)
-    success_count = sum(1 for s in signals_data["signals"] if s.get("status") == HIT_TARGET)
-    failed_count = sum(1 for s in signals_data["signals"] if s.get("status") == HIT_STOPLOSS)
-    expired_count = sum(1 for s in signals_data["signals"] if s.get("status") == EXPIRED)
+    # Get price
+    price = await get_crypto_price(coin)
     
-    # Calculate success rate
-    completed_count = success_count + failed_count + expired_count
-    success_rate = (success_count / completed_count * 100) if completed_count > 0 else 0
-    
-    # Calculate average performance
-    performances = [s.get("performance", 0) for s in signals_data["signals"] 
-                    if "performance" in s and s.get("status") != PENDING]
-    avg_performance = sum(performances) / len(performances) if performances else 0
-    
-    # Build performance summary
-    performance_text = (
-        f"📊 *Signal Performance Summary* 📊\n\n"
-        f"*Total Signals:* {total_signals}\n"
-        f"*Pending:* {pending_count}\n"
-        f"*Successful:* {success_count}\n"
-        f"*Failed:* {failed_count}\n"
-        f"*Expired:* {expired_count}\n\n"
-        f"*Success Rate:* {success_rate:.1f}%\n"
-        f"*Average Return:* {avg_performance:.2f}%\n\n"
-        f"*Select a detailed view:*"
-    )
-    
-    await update.message.reply_text(
-        performance_text,
-        reply_markup=reply_markup,
-        parse_mode="Markdown"
-    )
+    if price:
+        await update.message.reply_text(f"Current price of {coin}: ${price:,.2f}")
+    else:
+        await update.message.reply_text(f"Could not fetch price for {coin}. Please check the symbol and try again.")
 
-async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Test command to verify the bot is working in the current chat"""
-    chat_id = update.effective_chat.id
-    chat_type = update.effective_chat.type
+async def coins_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """View and manage favorite coins."""
     user = update.effective_user
+    user_id = str(user.id)
     
-    # Get bot information
-    bot_info = await context.bot.get_me()
+    # Ensure user exists in user_data
+    if user_id not in user_data["users"]:
+        user_data["users"][user_id] = {
+            "user_id": user_id,
+            "username": user.username,
+            "chat_id": update.effective_chat.id,
+            "subscribed": False,
+            "favorite_coins": []
+        }
+        await save_user_data()
     
-    # Send a response with details about the current chat
-    response = (
-        f"✅ *Bot Test Successful!*\n\n"
-        f"I can see and respond to messages in this {chat_type}.\n\n"
-        f"*Chat Details:*\n"
-        f"- Chat ID: `{chat_id}`\n"
-        f"- Chat Type: {chat_type}\n"
-        f"- Your Name: {user.full_name}\n"
-        f"- Bot Username: @{bot_info.username}\n\n"
+    # Check if adding a coin to favorites
+    if context.args:
+        coin = context.args[0].upper()
+        favorite_coins = user_data["users"][user_id].get("favorite_coins", [])
+        
+        if coin in favorite_coins:
+            favorite_coins.remove(coin)
+            await update.message.reply_text(f"{coin} removed from your favorites!")
+        else:
+            favorite_coins.append(coin)
+            await update.message.reply_text(f"{coin} added to your favorites!")
+        
+        user_data["users"][user_id]["favorite_coins"] = favorite_coins
+        await save_user_data()
+    
+    # Display favorite coins
+    favorite_coins = user_data["users"][user_id].get("favorite_coins", [])
+    
+    if favorite_coins:
+        coins_text = "Your favorite coins:\n\n" + "\n".join([f"• {coin}" for coin in favorite_coins])
+        coins_text += "\n\nTo add or remove a coin, use /coins <symbol>"
+    else:
+        coins_text = "You don't have any favorite coins yet. Add one with /coins <symbol>"
+    
+    await update.message.reply_text(coins_text)
+
+async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Debug command to show internal data (for admins only)."""
+    user = update.effective_user
+    # List of admin user IDs (add your Telegram ID here)
+    admin_ids = ["12345678"]  # Replace with actual admin IDs
+    
+    if str(user.id) not in admin_ids:
+        await update.message.reply_text("⚠️ This command is restricted to admins only.")
+        return
+    
+    debug_text = (
+        f"*Debug Information:*\n\n"
+        f"Users: {len(user_data['users'])}\n"
+        f"Subscribers: {sum(1 for user in user_data['users'].values() if user.get('subscribed', False))}\n"
+        f"Signals: {len(signals_data['signals'])}\n"
+        f"Pending Signals: {sum(1 for signal in signals_data['signals'] if signal.get('status') == PENDING)}\n"
     )
     
-    if chat_type in ["group", "supergroup"]:
-        response += (
-            f"*Group Instructions:*\n"
-            f"1. To create a signal, tag me like this:\n"
-            f"   `@{bot_info.username} $BTC SHORT HIGH Your signal text`\n\n"
-            f"2. Make sure I have permission to read all messages\n"
-            f"3. If tagging doesn't work, try adding me as an admin\n"
-            f"4. Privacy mode must be disabled via BotFather\n\n"
-            f"Use /debug for more detailed diagnostics"
-        )
+    await update.message.reply_text(debug_text, parse_mode="Markdown")
+
+async def privacy_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Privacy information."""
+    privacy_text = (
+        "*Privacy Information:*\n\n"
+        "This bot collects the following data:\n"
+        "• Your Telegram user ID\n"
+        "• Your username\n"
+        "• Your chat ID\n"
+        "• Your favorite coins (if you add any)\n"
+        "• Your subscription status\n\n"
+        "This data is used solely for the purpose of sending you signal notifications "
+        "based on your preferences.\n\n"
+        "You can delete your data by unsubscribing using /unsubscribe."
+    )
     
-    await update.message.reply_text(response, parse_mode="Markdown")
+    await update.message.reply_text(privacy_text, parse_mode="Markdown")
 
 async def stat_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Display statistics about signals, subscribers, and success rates."""
-    logger.debug("stat_command called by user_id: %s", update.effective_user.id)
+    """Show statistics about signals, subscribers, and success rates."""
+    if not signals_data["signals"]:
+        await update.message.reply_text("No signals data available yet.")
+        return
     
-    try:
-        # Count total signals
-        total_signals = len(signals_data.get("signals", []))
-        logger.debug("Total signals: %d", total_signals)
-        
-        # Count subscribers
-        subscribers_count = len(user_data.get("subscribers", []))
-        logger.debug("Subscribers count: %d", subscribers_count)
-        
-        # Calculate success rates
-        successful_signals = 0
-        failed_signals = 0
-        pending_signals = 0
-        
-        # Debug: Print signal status counts
-        status_counts = {"PENDING": 0, "HIT_TARGET": 0, "HIT_STOPLOSS": 0, "EXPIRED": 0, "None": 0}
-        
-        if "signals" in signals_data:
-            for signal in signals_data["signals"]:
-                status = signal.get("status", PENDING)
-                if status in status_counts:
-                    status_counts[status] += 1
-                else:
-                    status_counts["None"] += 1
-                    
-                if status == HIT_TARGET:
-                    successful_signals += 1
-                elif status in [HIT_STOPLOSS, EXPIRED]:
-                    failed_signals += 1
-                else:
-                    pending_signals += 1
-        
-        logger.debug("Signal status counts: %s", status_counts)
-        logger.debug("Successful: %d, Failed: %d, Pending: %d", successful_signals, failed_signals, pending_signals)
-        
-        # Calculate success rate safely
-        completed_signals = successful_signals + failed_signals
-        success_rate = round((successful_signals / completed_signals * 100), 2) if completed_signals > 0 else 0
-        
-        # Count unique coins
-        unique_coins = set()
-        if "signals" in signals_data:
-            for signal in signals_data["signals"]:
-                if "coin" in signal:
-                    unique_coins.add(signal["coin"])
-        
-        logger.debug("Unique coins: %s", unique_coins)
-        
-        # Count by timeframe
-        timeframe_counts = {tf: 0 for tf in TIMEFRAMES}
-        if "signals" in signals_data:
-            for signal in signals_data["signals"]:
-                tf = signal.get("timeframe")
-                if tf in timeframe_counts and tf is not None:
-                    timeframe_counts[tf] += 1
-        
-        logger.debug("Timeframe counts: %s", timeframe_counts)
-        
-        # Count by risk level
-        risk_counts = {risk: 0 for risk in RISK_LEVELS}
-        if "signals" in signals_data:
-            for signal in signals_data["signals"]:
-                risk = signal.get("risk")
-                if risk in risk_counts and risk is not None:
-                    risk_counts[risk] += 1
-        
-        logger.debug("Risk counts: %s", risk_counts)
-        
-        # Format message
-        message = (
-            f"📊 *Bot Statistics* 📊\n\n"
-            f"*Total Signals:* {total_signals}\n"
-            f"*Subscribers:* {subscribers_count}\n\n"
-            
-            f"*Signal Performance:*\n"
-            f"✅ Successful: {successful_signals}" + (f" ({success_rate}%)" if completed_signals > 0 else "") + f"\n"
-            f"❌ Failed: {failed_signals}\n"
-            f"⏳ Pending: {pending_signals}\n\n"
-            
-            f"*Unique Coins:* {len(unique_coins)}\n\n"
-            
-            f"*By Timeframe:*\n"
-            f"SHORT: {timeframe_counts['SHORT']}\n"
-            f"MID: {timeframe_counts['MID']}\n"
-            f"LONG: {timeframe_counts['LONG']}\n\n"
-            
-            f"*By Risk Level:*\n"
-            f"LOW: {risk_counts['LOW']}\n"
-            f"MEDIUM: {risk_counts['MEDIUM']}\n"
-            f"HIGH: {risk_counts['HIGH']}\n\n"
-            
-            f"*Most Recent Update:* {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        )
-        
-        logger.debug("Sending stat message: %s", message)
-        await update.message.reply_text(message, parse_mode="Markdown")
+    # Count signals
+    total_signals = len(signals_data["signals"])
+    successful_signals = sum(1 for s in signals_data["signals"] if s.get("status") == HIT_TARGET)
+    failed_signals = sum(1 for s in signals_data["signals"] if s.get("status") == HIT_STOPLOSS)
+    expired_signals = sum(1 for s in signals_data["signals"] if s.get("status") == EXPIRED)
+    pending_signals = sum(1 for s in signals_data["signals"] if s.get("status") == PENDING)
     
-    except Exception as e:
-        logger.error(f"Error in stat_command: {e}", exc_info=True)
-        await update.message.reply_text(f"⚠️ Error generating statistics: {str(e)}")
+    # Success rate calculation
+    completed_signals = successful_signals + failed_signals + expired_signals
+    success_rate = (successful_signals / completed_signals * 100) if completed_signals > 0 else 0
+    
+    # Count subscribers
+    subscribers = sum(1 for user in user_data["users"].values() if user.get("subscribed", False))
+    
+    # Count unique coins
+    unique_coins = set(s.get("coin") for s in signals_data["signals"] if s.get("coin"))
+    
+    # Count by timeframe
+    timeframe_counts = {}
+    for tf in TIMEFRAMES:
+        timeframe_counts[tf] = sum(1 for s in signals_data["signals"] if s.get("timeframe") == tf)
+    
+    # Count by risk level
+    risk_counts = {}
+    for risk in RISK_LEVELS:
+        risk_counts[risk] = sum(1 for s in signals_data["signals"] if s.get("risk_level") == risk)
+    
+    # Format statistics message
+    stats_text = (
+        f"*Signal Bot Statistics:*\n\n"
+        f"*Signals:*\n"
+        f"Total: {total_signals}\n"
+        f"Successful: {successful_signals}\n"
+        f"Failed: {failed_signals}\n"
+        f"Expired: {expired_signals}\n"
+        f"Pending: {pending_signals}\n"
+        f"Success Rate: {success_rate:.1f}%\n\n"
+        
+        f"*By Timeframe:*\n"
+    )
+    
+    for tf, count in timeframe_counts.items():
+        tf_success = sum(1 for s in signals_data["signals"] 
+                     if s.get("timeframe") == tf and s.get("status") == HIT_TARGET)
+        tf_total = sum(1 for s in signals_data["signals"] 
+                    if s.get("timeframe") == tf and s.get("status") != PENDING)
+        tf_rate = (tf_success / tf_total * 100) if tf_total > 0 else 0
+        stats_text += f"{tf}: {count} signals, {tf_rate:.1f}% success\n"
+    
+    stats_text += f"\n*By Risk Level:*\n"
+    for risk, count in risk_counts.items():
+        risk_success = sum(1 for s in signals_data["signals"] 
+                       if s.get("risk_level") == risk and s.get("status") == HIT_TARGET)
+        risk_total = sum(1 for s in signals_data["signals"] 
+                      if s.get("risk_level") == risk and s.get("status") != PENDING)
+        risk_rate = (risk_success / risk_total * 100) if risk_total > 0 else 0
+        stats_text += f"{risk}: {count} signals, {risk_rate:.1f}% success\n"
+    
+    stats_text += (
+        f"\n*Summary:*\n"
+        f"Unique Coins: {len(unique_coins)}\n"
+        f"Subscribers: {subscribers}\n"
+    )
+    
+    await update.message.reply_text(stats_text, parse_mode="Markdown")
 
 async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Allow users to configure their notification settings."""
-    user_id = str(update.effective_user.id)
+    """Configure user notification settings."""
+    user = update.effective_user
+    user_id = str(user.id)
     
-    # Initialize settings if needed
+    # Ensure user exists in user_data
+    if user_id not in user_data["users"]:
+        user_data["users"][user_id] = {
+            "user_id": user_id,
+            "username": user.username,
+            "chat_id": update.effective_chat.id,
+            "subscribed": False,
+            "favorite_coins": []
+        }
+        await save_user_data()
+    
+    # Initialize settings if they don't exist
     if "settings" not in user_data:
         user_data["settings"] = {}
+    
     if user_id not in user_data["settings"]:
         user_data["settings"][user_id] = {
             "notify_all_signals": True,
@@ -441,174 +347,116 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             "risk_filter": "ALL",
             "timeframe_filter": "ALL"
         }
+        await save_user_data()
     
+    # Get current settings
     settings = user_data["settings"][user_id]
     
-    # Create keyboard for settings
+    # Create inline keyboard
     keyboard = [
         [
-            InlineKeyboardButton(
-                f"{'✅' if settings['notify_all_signals'] else '❌'} All Signals", 
-                callback_data="settings_toggle_all"
-            ),
-            InlineKeyboardButton(
-                f"{'✅' if settings['notify_favorites_only'] else '❌'} Favorites Only",
-                callback_data="settings_toggle_favorites"
-            )
+            InlineKeyboardButton("All Signals: " + ("ON ✅" if settings["notify_all_signals"] else "OFF ❌"), 
+                                 callback_data="settings_toggle_all"),
+            InlineKeyboardButton("Favorites Only: " + ("ON ✅" if settings["notify_favorites_only"] else "OFF ❌"), 
+                                 callback_data="settings_toggle_favorites")
         ],
         [
-            InlineKeyboardButton(
-                f"Risk Filter: {settings['risk_filter']}",
-                callback_data="settings_risk"
-            )
+            InlineKeyboardButton("Risk Filter: " + settings["risk_filter"], 
+                                 callback_data="settings_cycle_risk"),
+            InlineKeyboardButton("Timeframe Filter: " + settings["timeframe_filter"], 
+                                 callback_data="settings_cycle_timeframe")
         ],
         [
-            InlineKeyboardButton(
-                f"Timeframe Filter: {settings['timeframe_filter']}",
-                callback_data="settings_timeframe"
-            )
-        ],
-        [
-            InlineKeyboardButton("Save Settings", callback_data="settings_save")
+            InlineKeyboardButton("💾 Save Settings", callback_data="settings_save")
         ]
     ]
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    message = (
-        f"⚙️ *User Settings* ⚙️\n\n"
-        f"Configure your notification preferences:\n\n"
-        f"*Receive Notifications:*\n"
-        f"{'✅' if settings['notify_all_signals'] else '❌'} All signals\n"
-        f"{'✅' if settings['notify_favorites_only'] else '❌'} Favorites only\n\n"
-        f"*Risk Level Filter:* {settings['risk_filter']}\n"
-        f"*Timeframe Filter:* {settings['timeframe_filter']}\n\n"
-        f"Use the buttons below to change your settings."
+    settings_text = (
+        f"*Notification Settings:*\n\n"
+        f"Here you can customize what signal notifications you receive.\n\n"
+        f"• All Signals: Receive updates for all signals\n"
+        f"• Favorites Only: Only receive updates for your favorite coins\n"
+        f"• Risk Filter: Filter signals by risk level\n"
+        f"• Timeframe Filter: Filter signals by timeframe\n\n"
+        f"Use the buttons below to configure your preferences:"
     )
     
-    await update.message.reply_text(
-        message,
-        reply_markup=reply_markup,
-        parse_mode="Markdown"
-    )
+    await update.message.reply_text(settings_text, reply_markup=reply_markup, parse_mode="Markdown")
 
-async def coins_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Add or remove coins from favorites"""
-    chat_id = str(update.effective_chat.id)
-    
-    # Initialize user if not exists
-    if chat_id not in user_data["users"]:
-        user = update.effective_user
-        user_data["users"][chat_id] = {
-            "name": user.full_name,
-            "username": user.username,
-            "chat_id": update.effective_chat.id,
-            "subscribed": True,
-            "joined_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "favorite_coins": []
-        }
-    
-    # Initialize favorite_coins if not exists
-    if "favorite_coins" not in user_data["users"][chat_id]:
-        user_data["users"][chat_id]["favorite_coins"] = []
-    
-    # If no arguments, show current favorites and options
-    if not context.args:
-        favorite_coins = user_data["users"][chat_id]["favorite_coins"]
-        
-        if favorite_coins:
-            coins_list = ", ".join(favorite_coins)
-            message = f"Your favorite coins: {coins_list}\n\n"
-        else:
-            message = "You don't have any favorite coins yet.\n\n"
-        
-        message += "To add a coin: /coins BTC\nTo remove a coin: /coins remove BTC"
-        
-        # Add buttons for adding/removing coins
-        keyboard = [
-            [InlineKeyboardButton("Add Coin", callback_data="add_coins")],
-            [InlineKeyboardButton("Remove Coin", callback_data="remove_coins")]
+async def performance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show detailed performance statistics and leaderboards."""
+    # Create inline keyboard for performance options
+    keyboard = [
+        [
+            InlineKeyboardButton("Signal Performance", callback_data="perf_signals"),
+            InlineKeyboardButton("Trader Leaderboard", callback_data="perf_traders")
+        ],
+        [
+            InlineKeyboardButton("Coin Performance", callback_data="perf_coins"),
+            InlineKeyboardButton("Timeframe Analysis", callback_data="perf_timeframe")
         ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await update.message.reply_text(message, reply_markup=reply_markup)
-        return
+    ]
     
-    # Handle adding/removing coins
-    action = context.args[0].lower()
+    reply_markup = InlineKeyboardMarkup(keyboard)
     
-    if action == "remove" and len(context.args) > 1:
-        # Remove a coin
-        coin = context.args[1].upper()
-        if coin in user_data["users"][chat_id]["favorite_coins"]:
-            user_data["users"][chat_id]["favorite_coins"].remove(coin)
-            await save_user_data()
-            await update.message.reply_text(f"Removed {coin} from your favorite coins!")
-        else:
-            await update.message.reply_text(f"{coin} is not in your favorites.")
-    else:
-        # Add a coin
-        coin = context.args[0].upper()
-        
-        # Check if coin exists by getting its price
-        price = await get_crypto_price(coin)
-        
-        if price:
-            if coin not in user_data["users"][chat_id]["favorite_coins"]:
-                user_data["users"][chat_id]["favorite_coins"].append(coin)
-                await save_user_data()
-                await update.message.reply_text(
-                    f"Added {coin} to your favorite coins! Current price: ${price:,.2f}"
-                )
-            else:
-                await update.message.reply_text(f"{coin} is already in your favorites.")
-        else:
-            await update.message.reply_text(
-                f"Couldn't find price for {coin}. Please check the symbol and try again."
-            )
-
-async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Debug command for admins"""
-    user_id = update.effective_user.id
-    
-    # Only allow specific users (replace with your user ID)
-    allowed_users = [123456789]  # Add your Telegram user ID here
-    
-    if user_id not in allowed_users:
-        await update.message.reply_text("You don't have permission to use this command.")
-        return
-    
-    # Send debug info
-    chat_id = update.effective_chat.id
-    chat_type = update.effective_chat.type
-    
-    # Send a response with details about the current chat
-    debug_info = (
-        f"*Debug Information*\n\n"
-        f"Chat ID: `{chat_id}`\n"
-        f"Chat Type: {chat_type}\n"
-        f"User ID: `{user_id}`\n"
-        f"Username: @{update.effective_user.username}\n"
-        f"Full Name: {update.effective_user.full_name}\n\n"
-        f"Total Signals: {len(signals_data['signals'])}\n"
-        f"Total Users: {len(user_data['users'])}\n"
-        f"Total Subscribers: {len(user_data.get('subscribers', []))}\n"
+    perf_text = (
+        f"*Performance Dashboard:*\n\n"
+        f"Select a category to view detailed performance statistics:"
     )
     
-    await update.message.reply_text(debug_info, parse_mode="Markdown")
+    await update.message.reply_text(perf_text, reply_markup=reply_markup, parse_mode="Markdown")
 
-async def privacy_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send instructions for fixing privacy settings"""
-    privacy_text = (
-        "🔒 *How to Fix Privacy Settings in Groups* 🔒\n\n"
-        "If the bot can't see messages in your group, follow these steps:\n\n"
-        "1. Go to your group settings\n"
-        f"2. Send /mybots command\n"
-        f"3. Select @{context.bot.username}\n"
-        f"4. Go to 'Privacy Settings'\n"
-        f"5. Select 'Turn off'\n"
-        f"6. Click 'Apply'\n\n"
-        f"*Note:* After changing this setting, please send /test in your group to verify it's working."
-    )
+async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Test command for developers to test features."""
+    # Check if this is an admin user
+    user = update.effective_user
+    admin_ids = ["12345678"]  # Replace with actual admin IDs
     
-    await update.message.reply_text(privacy_text, parse_mode="Markdown") 
+    if str(user.id) not in admin_ids:
+        await update.message.reply_text("⚠️ This command is restricted to admins only.")
+        return
+    
+    # Simple test message
+    await update.message.reply_text("Test command executed successfully. The bot is operational.")
+
+async def parser_test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Test the signal parser with the provided text"""
+    if not context.args:
+        await update.message.reply_text("Please provide text to test the parser. Usage: /parser_test your signal text here")
+        return
+    
+    # Get the text to parse
+    text = " ".join(context.args)
+    
+    try:
+        # Extract signal data
+        from src.services.signal_processor import extract_signal_data
+        coin, timeframe, risk_level, limit_order, take_profit, position, stop_loss, extracted_data = await extract_signal_data(text)
+        
+        # Format the results
+        result = "📊 *Parser Test Results:*\n\n"
+        result += f"*Text:* {text}\n\n"
+        result += f"*Coin:* {coin}\n"
+        result += f"*Position:* {position}\n"
+        result += f"*Entry:* {limit_order}\n"
+        result += f"*Take Profit:* {take_profit}\n"
+        
+        # Show all take profit targets
+        if extracted_data["take_profit_targets"]:
+            result += "*Take Profit Targets:*\n"
+            for tp_num, tp_val in sorted(extracted_data["take_profit_targets"].items()):
+                result += f"• TP{tp_num}: {tp_val}\n"
+        
+        result += f"*Stop Loss:* {stop_loss}\n"
+        result += f"*Timeframe:* {timeframe}\n"
+        result += f"*Risk Level:* {risk_level}\n"
+        
+        # Show all extracted data for reference
+        result += "\n*Raw Extracted Data:*\n"
+        result += str(extracted_data)
+        
+        await update.message.reply_text(result, parse_mode="Markdown")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error parsing signal: {str(e)}") 

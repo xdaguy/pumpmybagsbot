@@ -1,171 +1,95 @@
-# Pump My Bags Bot
+# PumpMyBagsBot
 
-A Telegram bot that forwards crypto trading signals to subscribers when tagged in a group chat, with advanced features for tracking coins, analyzing performance, and more.
+A Telegram bot for tracking cryptocurrency trading signals, monitoring their performance, and providing notifications when targets are hit.
 
 ## Features
 
-- 📢 **Signal Forwarding**: Automatically forwards tagged trading signals to all subscribers
-- 💰 **Price Checking**: Get real-time cryptocurrency prices with the `/price` command
-- ⏱️ **Signal Timeframes**: Support for SHORT, MID, and LONG timeframe classifications
-- ⚠️ **Risk Levels**: Categorize signals by LOW, MEDIUM, or HIGH risk
-- 👍 **Voting System**: Users can upvote or downvote signals to rate their quality
-- 📊 **Performance Tracking**: Track signal performance and view statistics by coin
-- ⭐ **Favorite Coins**: Users can track their favorite coins and get highlighted notifications
-- 🔍 **Coin Detection**: Automatically detects coin symbols in signals (format: $BTC)
-- 💎 **Coin Database**: Maintains a database of all coins mentioned in signals
-- ⚙️ **Custom Notifications**: User preference settings for notifications by risk level and timeframe
+- Parse natural language trading signals
+- Track signal performance over time
+- Multiple take profit targets support
+- Signal provider performance tracking
+- User notification preferences
+- Interactive settings management
+- Performance statistics and leaderboards
 
-## Project Structure
+## Prerequisites
 
-The codebase uses a modular structure with directories organized by functionality:
+- Python 3.9 or higher
+- A Telegram Bot Token (obtained from @BotFather)
 
-```
-pumpmybagsbot/
-├── main.py                  # Entry point for the bot
-├── src/                     # Source code directory
-│   ├── __init__.py          # Makes src a Python package
-│   ├── config.py            # Configuration, constants, and data loading
-│   ├── handlers/            # Command and callback handlers
-│   │   ├── __init__.py
-│   │   ├── command_handlers.py  # Bot command handlers
-│   │   ├── callback_handlers.py # Button callback handlers
-│   │   └── message_handlers.py  # Message handling
-│   └── services/            # Core services
-│       ├── __init__.py
-│       ├── data_handlers.py     # Data saving/loading
-│       ├── price_service.py     # Cryptocurrency price services
-│       ├── signal_processor.py  # Signal processing and analysis
-│       └── job_queue.py         # Periodic tasks
-├── signals.json             # Signal data storage
-├── user_data.json           # User data storage
-├── coins.json               # Coin data storage
-└── .env                     # Environment variables
-```
+## Installation
 
-## Setup Instructions
-
-### 1. Prerequisites
-
-- Python 3.7 or higher
-- A Telegram account
-- Server for hosting the bot
-
-### 2. Create a Bot on Telegram
-
-1. Open Telegram and search for `@BotFather`
-2. Start a chat with BotFather and send `/newbot`
-3. Follow the instructions to create a new bot
-4. Note down the HTTP API token provided by BotFather
-
-### 3. Install Dependencies
-
+1. Clone the repository:
 ```bash
-# Clone the repository
-git clone <your-repository-url>
+git clone https://github.com/yourusername/pumpmybagsbot.git
 cd pumpmybagsbot
+```
 
-# Install required packages
+2. Install the required dependencies:
+```bash
 pip install -r requirements.txt
 ```
 
-### 4. Configuration
-
-1. Create a `.env` file in the project directory
-2. Add your bot token to the `.env` file:
+3. Create a `.env` file in the root directory with your Telegram Bot Token:
 ```
-BOT_TOKEN=your_bot_token_here
-```
-
-### 5. Start the Bot
-
-```bash
-python main.py
+BOT_TOKEN=your_telegram_bot_token_here
 ```
 
 ## Usage
 
-### Bot Commands
-
-- `/start` - Start the bot and subscribe to signals
-- `/help` - Display help information
-- `/subscribe` - Subscribe to crypto signals
-- `/unsubscribe` - Unsubscribe from crypto signals
-- `/signals` - View recent trading signals
-- `/price [symbol]` - Check current price of a cryptocurrency
-- `/coins [symbol]` - Track your favorite coins
-- `/performance` - View signal performance statistics
-- `/settings` - Configure notification preferences
-- `/stat` - View bot usage statistics
-- `/test` - Test if the bot is working in a group
-
-### How to Use in Groups
-
-1. Add the bot to your Telegram group
-2. When posting a trading signal, tag the bot with the following format:
-   ```
-   @YourBotUsername $BTC SHORT HIGH Buy BTC at 80K, target 100K 🚀
-   ```
-   Where:
-   - `$BTC` is the coin symbol (required for auto-detection)
-   - `SHORT/MID/LONG` indicates the timeframe (optional)
-   - `LOW/MEDIUM/HIGH` indicates the risk level (optional)
-
-3. The bot will forward this signal to all subscribers and track its performance
-4. Users can vote on signals with the 👍 and 👎 buttons
-
-### Favorite Coins Feature
-
-1. Use `/coins BTC` to add Bitcoin to your favorites
-2. Use `/coins` to view all your favorites with current prices
-3. When a signal mentions one of your favorite coins, you'll receive an additional notification
-4. Manage your favorite coins list with the provided buttons
-
-### Notification Settings
-
-Use the `/settings` command to customize your notification preferences:
-- Choose to receive all signals or only those mentioning your favorite coins
-- Filter signals by risk level (LOW, MEDIUM, HIGH, or ALL)
-- Filter signals by timeframe (SHORT, MID, LONG, or ALL)
-
-## Running on a Server
-
-For the bot to work continuously, you need to run it on a server. Here are some options:
-
-- Use a simple systemd service on Linux
-- Use screen or tmux to keep the process running
-- Set up a Docker container
-
-Example systemd service file (`/etc/systemd/system/pumpbags.service`):
-
-```
-[Unit]
-Description=Pump My Bags Telegram Bot
-After=network.target
-
-[Service]
-User=yourusername
-WorkingDirectory=/path/to/pumpmybagsbot
-ExecStart=/usr/bin/python3 /path/to/pumpmybagsbot/main.py
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-```
-
-To set up as a service:
+1. Start the bot:
 ```bash
-sudo systemctl enable pumpbags.service
-sudo systemctl start pumpbags.service
-sudo systemctl status pumpbags.service
+python main.py
 ```
+
+2. Interact with the bot on Telegram using the following commands:
+   - `/start` - Start the bot and see available commands
+   - `/help` - Show help information
+   - `/subscribe` - Subscribe to signal notifications
+   - `/unsubscribe` - Unsubscribe from notifications
+   - `/signals` - Show recent signals
+   - `/price <coin>` - Check current price of a coin
+   - `/coins` - View and manage your favorite coins
+   - `/stat` - View signal statistics
+   - `/settings` - Configure your notification preferences
+
+3. Share trading signals by:
+   - Tagging the bot: `@pumpmybagsbot short btc at 85k, tp1 is 84k, tp2 is 83k, risk is low.`
+   - Using the `/s` command: `/s long eth at 2210, tp is 2500, high risk, long frame`
 
 ## Data Storage
 
-The bot stores data in three JSON files:
-- `user_data.json`: Stores user information, favorite coins, and notification settings
-- `signals.json`: Stores all signals with their voting history and performance metrics
-- `coins.json`: Tracks all coins mentioned in signals and their statistics
+The bot stores data in the `data/` directory:
+- `user_data.json` - User subscriptions and preferences
+- `signals_data.json` - Tracked signals and their performance
+- `coins_data.json` - Information about tracked coins
 
-## Disclaimer
+## Project Structure
 
-This bot is for educational purposes only. Cryptocurrency trading involves substantial risk of loss and is not suitable for all investors. Always do your own research before making any investment decisions. 
+```
+pumpmybagsbot/
+├── main.py                    # Entry point for the bot
+├── requirements.txt           # Project dependencies
+├── .env                       # Environment variables (BOT_TOKEN, etc.)
+├── src/
+│   ├── config.py              # Configuration, constants, and shared variables
+│   ├── services/
+│   │   ├── data_handlers.py   # Functions for loading/saving data
+│   │   ├── job_queue.py       # Periodic jobs for checking signal performance
+│   │   ├── price_service.py   # Functions to fetch and parse cryptocurrency prices
+│   │   └── signal_processor.py # Core signal parsing and evaluation logic
+│   ├── handlers/
+│   │   ├── command_handlers.py # Handle bot commands (/start, /help, etc.)
+│   │   ├── message_handlers.py # Handle user messages and signal parsing
+│   │   └── callback_handlers.py # Handle button callbacks
+│   └── utils/                 # Utility functions
+└── data/                      # Stored data (signals, user preferences, etc.)
+```
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details. 

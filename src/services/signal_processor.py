@@ -149,14 +149,14 @@ async def update_all_signals_performance():
         if "status" not in signal:
             signal["status"] = PENDING
         
-        # Skip signals that are already completed
-        if signal["status"] in [HIT_TARGET, HIT_STOPLOSS, EXPIRED]:
-            continue
-        
-        # Check and update signal performance
-        updated_signal = await check_signal_performance(signal)
-        if updated_signal.get("status") != PENDING:
-            updated = True
+        # Only check pending signals
+        if signal["status"] == PENDING:
+            original_status = signal.get("status")
+            updated_signal = await check_signal_performance(signal)
+            
+            # Update if status changed
+            if updated_signal.get("status") != original_status:
+                updated = True
     
     if updated:
         await save_signals_data()
@@ -165,6 +165,8 @@ async def update_all_signals_performance():
 
 async def extract_signal_data(text):
     """Extract coin symbol, timeframe, risk level and trading details from natural language text"""
+    logger.info(f"Extracting data from text: {text}")
+    
     # Extract coin symbols - try various patterns
     coin = None
     
@@ -200,13 +202,13 @@ async def extract_signal_data(text):
     elif re.search(r'\b[Ss]ell\b', text):
         position = "Short"
     
-    # Extract entry price (more flexible patterns)
+    # Extract entry price (limit order)
     entry_price = None
-    # Try patterns like "at 88k", "entry 88k", "price 88k", "88k"
+    limit_order = None
     entry_patterns = [
-        r'(?:entry|enter at|entry at|entry price|buy at|sell at|at|price|@)\s*(\d+(?:,\d+)*(?:\.\d+)?[kK]?)',  # at 88k, entry 88k, price 88k
-        r'(?:buy|long|short|sell).*?(\d+(?:,\d+)*(?:\.\d+)?[kK]?)', # long BTC at 88k, short at 91k
-        r'\bentry\s*[:-]?\s*(\d+(?:,\d+)*(?:\.\d+)?[kK]?)',  # entry: 88k or entry - 88k
+        r'(?:entry|enter|buy|long|short|sell)[^0-9]*(?:at|@|:)?\s*(\d+(?:,\d+)*(?:\.\d+)?[kK]?)',  # entry at 88k, buy at 88k
+        r'(?:at|@)\s*(\d+(?:,\d+)*(?:\.\d+)?[kK]?)',  # at 88k
+        r'\b(\d+(?:,\d+)*(?:\.\d+)?[kK]?)\s*(?:entry|enter|buy|long|short|sell)',  # 88k entry
         r'\blimit\s*[:-]?\s*(\d+(?:,\d+)*(?:\.\d+)?[kK]?)',  # limit: 88k
         r'\border\s*[:-]?\s*(\d+(?:,\d+)*(?:\.\d+)?[kK]?)'  # order: 88k
     ]
@@ -217,24 +219,30 @@ async def extract_signal_data(text):
             entry_price = match.group(1)
             # Remove commas from numbers like 1,000
             entry_price = entry_price.replace(',', '')
+            limit_order = entry_price
             break
     
     # Extract multiple take profit targets
     take_profit_dict = {}
     take_profit = None
     
-    # First look for specific TP1, TP2, TP3 format
-    tp_numbered_pattern = r'(?:tp|take profit|target|t\.p\.|tp target)\s*(\d+)\s*[:-]?\s*(\d+(?:,\d+)*(?:\.\d+)?[kK]?)'
+    logger.info("Searching for take profit targets...")
+    
+    # First look for specific TP1, TP2, TP3 format - use a stronger pattern with word boundaries
+    tp_numbered_pattern = r'\b(?:tp|take profit|target|t\.p\.)\s*(\d+)\s*(?:is|are|at|@|:|=|\s+)?\s*(\d+(?:,\d+)*(?:\.\d+)?[kK]?)'
+    logger.debug(f"Using TP numbered pattern: {tp_numbered_pattern}")
+    
+    # Find all matches in the text - allows for finding multiple TP targets
     for match in re.finditer(tp_numbered_pattern, text, re.IGNORECASE):
         tp_number = int(match.group(1))
         tp_value = match.group(2).replace(',', '')
         take_profit_dict[tp_number] = tp_value
-        logger.debug(f"Found TP{tp_number}: {tp_value}")
+        logger.info(f"Found TP{tp_number}: {tp_value} using numbered pattern")
     
     # Look for multiple take profits in other formats
     tp_patterns = [
         # Main TP/target patterns
-        r'(?:tp|take profit|target|t\.p\.|price target)\s*[:-]?\s*(\d+(?:,\d+)*(?:\.\d+)?[kK]?)',  # tp: 146k, target: 146k
+        r'(?:tp|take profit|target|t\.p\.|price target)\s*(?:is|are|at|@|:|=)?\s*(\d+(?:,\d+)*(?:\.\d+)?[kK]?)',  # tp: 146k, target: 146k, tp is 146k
         r'(?:tp|take profit|target|t\.p\.)[^0-9]*(\d+(?:,\d+)*(?:\.\d+)?[kK]?)',  # tp at 146k, target 146k
         r'(?:to reach|reach)[^0-9]*(\d+(?:,\d+)*(?:\.\d+)?[kK]?)',  # to reach 85k
         
@@ -248,9 +256,11 @@ async def extract_signal_data(text):
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
             take_profit = match.group(1).replace(',', '')
+            logger.info(f"Found general take profit: {take_profit} using pattern: {pattern}")
             # If we found a general TP and don't already have a TP1, save it as TP1
             if 1 not in take_profit_dict:
                 take_profit_dict[1] = take_profit
+                logger.info(f"Setting TP1 to {take_profit} from general take profit")
             break
     
     # If we found multiple TPs, use the first one as the primary TP
@@ -262,26 +272,77 @@ async def extract_signal_data(text):
     
     # Extract stop loss
     stop_loss = None
+    logger.info("Searching for stop loss...")
+    
     sl_patterns = [
-        r'(?:sl|stop loss|stop|s\.l\.)\s*[:-]?\s*(\d+(?:,\d+)*(?:\.\d+)?[kK]?)',  # sl: 75k
-        r'(?:sl|stop loss|stop|s\.l\.)[^0-9]*(\d+(?:,\d+)*(?:\.\d+)?[kK]?)',  # sl at 75k
+        # Common SL formats
+        r'\b(?:sl|stop loss|stop|s\.l\.)\s*(?:is|are|at|@|:|=)?\s*(\d+(?:,\d+)*(?:\.\d+)?[kK]?)',  # sl: 75k, sl is 75k
+        r'\b(?:sl|stop loss|stop|s\.l\.)[^0-9]*(\d+(?:,\d+)*(?:\.\d+)?[kK]?)',  # sl at 75k, stop loss at 75k
+        
+        # Additional formats
+        r'\bstoploss\s*(?:is|at|:|=)?\s*(\d+(?:,\d+)*(?:\.\d+)?[kK]?)',  # stoploss: 75k
+        r'\b(?:cut loss|exit if)\s*(?:at|below|above)?\s*(\d+(?:,\d+)*(?:\.\d+)?[kK]?)',  # cut loss at 75k, exit if below 75k
     ]
     
     for pattern in sl_patterns:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
             stop_loss = match.group(1).replace(',', '')
-            logger.debug(f"Found stop loss: {stop_loss}")
+            logger.info(f"Found stop loss: {stop_loss} using pattern: {pattern}")
             break
+    
+    if not stop_loss:
+        logger.info("No explicit stop loss found in text")
     
     # Extract timeframe from words or context
     timeframe = None
-    if re.search(r'\b(short(-|\s)?term|hourly|hour|hours|short(\s)?frame|day|daily|intraday|scalp|scalping|quick|1h|4h)\b', text, re.IGNORECASE):
-        timeframe = "SHORT"
-    elif re.search(r'\b(mid(-|\s)?term|mid|week|weekly|days|medium|1d|swing)\b', text, re.IGNORECASE):
-        timeframe = "MID"
-    elif re.search(r'\b(long(-|\s)?term|long(\s)?frame|month|monthly|year|yearly|hodl|holding|investment)\b', text, re.IGNORECASE):
-        timeframe = "LONG"
+    
+    # First use specific timeframe-related terms that won't be confused with position
+    timeframe_patterns = {
+        "SHORT": [
+            r'\b(short[\s-]?term|hourly|hour[s]?|short[\s-]?frame|day|daily|intraday|scalp|scalping|quick|1h|4h)\b',
+            r'\btimeframe[\s-:]+short\b',
+            r'\bshort[\s-]?timeframe\b'
+        ],
+        "MID": [
+            r'\b(mid[\s-]?term|weekly|week[s]?|medium[\s-]?term|swing|1d|mid[\s-]?timeframe)\b',
+            r'\btimeframe[\s-:]+mid\b',
+            r'\bmid[\s-]?timeframe\b'
+        ],
+        "LONG": [
+            r'\b(long[\s-]?term|month|monthly|year|yearly|hodl|holding|investment|long[\s-]?timeframe)\b',
+            r'\btimeframe[\s-:]+long\b',
+            r'\blong[\s-]?timeframe\b'
+        ]
+    }
+    
+    # Check each pattern
+    for tf, patterns in timeframe_patterns.items():
+        for pattern in patterns:
+            if re.search(pattern, text, re.IGNORECASE):
+                timeframe = tf
+                logger.info(f"Found timeframe {timeframe} using pattern: {pattern}")
+                break
+        if timeframe:
+            break
+            
+    # Don't use the exact word fallback, as it can confuse with position
+    # Instead, set a default based on signal characteristics
+    if not timeframe:
+        # Set default timeframe if none is detected
+        # Determine default timeframe based on signal characteristics
+        # Short positions usually have shorter timeframes
+        if position and position.lower() == "short":
+            timeframe = "SHORT"
+            logger.info(f"No explicit timeframe found, defaulting to SHORT based on short position")
+        # If we have a very high take profit target compared to entry, likely longer timeframe
+        elif take_profit and entry_price and parse_price(take_profit) > parse_price(entry_price) * 1.5:
+            timeframe = "LONG"
+            logger.info(f"No explicit timeframe found, defaulting to LONG based on high take profit target")
+        else:
+            # Default to MID if we can't determine
+            timeframe = "MID"
+            logger.info(f"No explicit timeframe found, defaulting to MID as fallback")
     
     # Extract risk level from various wordings
     risk_level = None
@@ -294,17 +355,50 @@ async def extract_signal_data(text):
     
     # Fallback: If a timeframe/risk level is not specified in context words,
     # check for the exact words SHORT, MID, LONG, LOW, MEDIUM, HIGH in the message
-    if not timeframe:
-        for tf in TIMEFRAMES:
-            if tf in text.upper():
-                timeframe = tf
-                break
-    
     if not risk_level:
         for risk in RISK_LEVELS:
             if risk in text.upper():
                 risk_level = risk
                 break
+    
+    # Set default risk level if none is detected
+    if not risk_level:
+        # Determine default risk level based on signal characteristics
+        # Determine risk by comparing stop loss to entry (larger distance = lower risk)
+        if stop_loss and entry_price:
+            entry = parse_price(entry_price)
+            sl = parse_price(stop_loss)
+            
+            # Calculate stop loss percentage
+            if position and position.lower() == "long":
+                if entry > 0:
+                    sl_pct = (entry - sl) / entry * 100
+                    if sl_pct <= 3:  # Low risk: tight stop loss (3% or less)
+                        risk_level = "LOW"
+                    elif sl_pct <= 10:  # Medium risk: moderate stop loss (3-10%)
+                        risk_level = "MEDIUM"
+                    else:  # High risk: wide stop loss (>10%)
+                        risk_level = "HIGH"
+            else:  # Short position
+                if entry > 0:
+                    sl_pct = (sl - entry) / entry * 100
+                    if sl_pct <= 3:
+                        risk_level = "LOW"
+                    elif sl_pct <= 10:
+                        risk_level = "MEDIUM"
+                    else:
+                        risk_level = "HIGH"
+        
+        # If we still don't have a risk level, set based on timeframe
+        if not risk_level:
+            if timeframe == "SHORT":
+                risk_level = "MEDIUM"  # Short timeframe usually medium risk
+            elif timeframe == "LONG":
+                risk_level = "LOW"  # Longer timeframe usually lower risk
+            else:
+                risk_level = "MEDIUM"  # Default to medium risk
+        
+        logger.debug(f"No risk level found in text, defaulting to {risk_level}")
     
     # Store all extracted data for easy access and extension
     extracted_data = {
@@ -318,5 +412,4 @@ async def extract_signal_data(text):
         "risk_level": risk_level
     }
     
-    logger.debug(f"Extracted signal data: {extracted_data}")
-    return coin, timeframe, risk_level, entry_price, take_profit, position, stop_loss, extracted_data 
+    return coin, timeframe, risk_level, limit_order, take_profit, position, stop_loss, extracted_data 
