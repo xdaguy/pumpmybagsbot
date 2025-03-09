@@ -324,76 +324,108 @@ async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def stat_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Display statistics about signals, subscribers, and success rates."""
+    logger.debug("stat_command called by user_id: %s", update.effective_user.id)
     
-    # Count total signals
-    total_signals = len(signals_data["signals"])
-    
-    # Count subscribers
-    subscribers_count = len(user_data.get("subscribers", []))
-    
-    # Calculate success rates
-    successful_signals = 0
-    failed_signals = 0
-    pending_signals = 0
-    
-    for signal in signals_data["signals"]:
-        status = signal.get("status", PENDING)
-        if status == HIT_TARGET:
-            successful_signals += 1
-        elif status in [HIT_STOPLOSS, EXPIRED]:
-            failed_signals += 1
-        else:
-            pending_signals += 1
-    
-    success_rate = round((successful_signals / total_signals * 100), 2) if total_signals > 0 else 0
-    
-    # Count unique coins
-    unique_coins = set()
-    for signal in signals_data["signals"]:
-        if "coin" in signal:
-            unique_coins.add(signal["coin"])
-    
-    # Count by timeframe
-    timeframe_counts = {tf: 0 for tf in TIMEFRAMES}
-    for signal in signals_data["signals"]:
-        tf = signal.get("timeframe")
-        if tf in timeframe_counts and tf is not None:
-            timeframe_counts[tf] += 1
-    
-    # Count by risk level
-    risk_counts = {risk: 0 for risk in RISK_LEVELS}
-    for signal in signals_data["signals"]:
-        risk = signal.get("risk")
-        if risk in risk_counts and risk is not None:
-            risk_counts[risk] += 1
-    
-    # Format message
-    message = (
-        f"📊 *Bot Statistics* 📊\n\n"
-        f"*Total Signals:* {total_signals}\n"
-        f"*Subscribers:* {subscribers_count}\n\n"
+    try:
+        # Count total signals
+        total_signals = len(signals_data.get("signals", []))
+        logger.debug("Total signals: %d", total_signals)
         
-        f"*Signal Performance:*\n"
-        f"✅ Successful: {successful_signals} ({success_rate}%)\n"
-        f"❌ Failed: {failed_signals}\n"
-        f"⏳ Pending: {pending_signals}\n\n"
+        # Count subscribers
+        subscribers_count = len(user_data.get("subscribers", []))
+        logger.debug("Subscribers count: %d", subscribers_count)
         
-        f"*Unique Coins:* {len(unique_coins)}\n\n"
+        # Calculate success rates
+        successful_signals = 0
+        failed_signals = 0
+        pending_signals = 0
         
-        f"*By Timeframe:*\n"
-        f"SHORT: {timeframe_counts['SHORT']}\n"
-        f"MID: {timeframe_counts['MID']}\n"
-        f"LONG: {timeframe_counts['LONG']}\n\n"
+        # Debug: Print signal status counts
+        status_counts = {"PENDING": 0, "HIT_TARGET": 0, "HIT_STOPLOSS": 0, "EXPIRED": 0, "None": 0}
         
-        f"*By Risk Level:*\n"
-        f"LOW: {risk_counts['LOW']}\n"
-        f"MEDIUM: {risk_counts['MEDIUM']}\n"
-        f"HIGH: {risk_counts['HIGH']}\n\n"
+        if "signals" in signals_data:
+            for signal in signals_data["signals"]:
+                status = signal.get("status", PENDING)
+                if status in status_counts:
+                    status_counts[status] += 1
+                else:
+                    status_counts["None"] += 1
+                    
+                if status == HIT_TARGET:
+                    successful_signals += 1
+                elif status in [HIT_STOPLOSS, EXPIRED]:
+                    failed_signals += 1
+                else:
+                    pending_signals += 1
         
-        f"*Most Recent Update:* {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-    )
+        logger.debug("Signal status counts: %s", status_counts)
+        logger.debug("Successful: %d, Failed: %d, Pending: %d", successful_signals, failed_signals, pending_signals)
+        
+        # Calculate success rate safely
+        completed_signals = successful_signals + failed_signals
+        success_rate = round((successful_signals / completed_signals * 100), 2) if completed_signals > 0 else 0
+        
+        # Count unique coins
+        unique_coins = set()
+        if "signals" in signals_data:
+            for signal in signals_data["signals"]:
+                if "coin" in signal:
+                    unique_coins.add(signal["coin"])
+        
+        logger.debug("Unique coins: %s", unique_coins)
+        
+        # Count by timeframe
+        timeframe_counts = {tf: 0 for tf in TIMEFRAMES}
+        if "signals" in signals_data:
+            for signal in signals_data["signals"]:
+                tf = signal.get("timeframe")
+                if tf in timeframe_counts and tf is not None:
+                    timeframe_counts[tf] += 1
+        
+        logger.debug("Timeframe counts: %s", timeframe_counts)
+        
+        # Count by risk level
+        risk_counts = {risk: 0 for risk in RISK_LEVELS}
+        if "signals" in signals_data:
+            for signal in signals_data["signals"]:
+                risk = signal.get("risk")
+                if risk in risk_counts and risk is not None:
+                    risk_counts[risk] += 1
+        
+        logger.debug("Risk counts: %s", risk_counts)
+        
+        # Format message
+        message = (
+            f"📊 *Bot Statistics* 📊\n\n"
+            f"*Total Signals:* {total_signals}\n"
+            f"*Subscribers:* {subscribers_count}\n\n"
+            
+            f"*Signal Performance:*\n"
+            f"✅ Successful: {successful_signals}" + (f" ({success_rate}%)" if completed_signals > 0 else "") + f"\n"
+            f"❌ Failed: {failed_signals}\n"
+            f"⏳ Pending: {pending_signals}\n\n"
+            
+            f"*Unique Coins:* {len(unique_coins)}\n\n"
+            
+            f"*By Timeframe:*\n"
+            f"SHORT: {timeframe_counts['SHORT']}\n"
+            f"MID: {timeframe_counts['MID']}\n"
+            f"LONG: {timeframe_counts['LONG']}\n\n"
+            
+            f"*By Risk Level:*\n"
+            f"LOW: {risk_counts['LOW']}\n"
+            f"MEDIUM: {risk_counts['MEDIUM']}\n"
+            f"HIGH: {risk_counts['HIGH']}\n\n"
+            
+            f"*Most Recent Update:* {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        
+        logger.debug("Sending stat message: %s", message)
+        await update.message.reply_text(message, parse_mode="Markdown")
     
-    await update.message.reply_text(message, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Error in stat_command: {e}", exc_info=True)
+        await update.message.reply_text(f"⚠️ Error generating statistics: {str(e)}")
 
 async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Allow users to configure their notification settings."""

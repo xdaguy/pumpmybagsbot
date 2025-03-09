@@ -32,10 +32,15 @@ async def periodic_signal_check(context: ContextTypes.DEFAULT_TYPE):
             performance = signal.get("performance", 0)
             perf_sign = "+" if performance >= 0 else ""
             
+            # Enhance message to show which take profit target was hit
+            hit_tp_info = ""
+            if status == HIT_TARGET and "hit_tp" in signal:
+                hit_tp_info = f"\n*Take Profit Target:* TP{signal['hit_tp']}"
+            
             message = (
                 f"{status_emoji} *Signal Update* {status_emoji}\n\n"
                 f"*Coin:* {coin}\n"
-                f"*Status:* {status}\n"
+                f"*Status:* {status}{hit_tp_info}\n"
                 f"*Performance:* {perf_sign}{performance:.2f}%\n"
                 f"*Entry Price:* ${parse_price(signal.get('limit_order', '0')):,.2f}\n"
                 f"*Exit Price:* ${signal.get('exit_price', 0):,.2f}\n"

@@ -28,16 +28,53 @@ async def check_signal_performance(signal):
     entry_price = parse_price(signal.get("limit_order"))
     target_price = parse_price(signal.get("take_profit"))
     
-    # Default stop loss (20% in opposite direction of trade)
+    # Get explicit stop loss if defined, otherwise use default
+    explicit_stop_loss = parse_price(signal.get("stop_loss"))
+    
+    # Position and default stop loss
     position = signal.get("position", "Long")
     stop_loss_pct = 0.2  # 20% default stop loss
     
+    # Check for multiple take profit targets
+    tp_targets = {}
+    if "take_profit_targets" in signal and signal["take_profit_targets"]:
+        for tp_num, tp_val in signal["take_profit_targets"].items():
+            tp_targets[int(tp_num)] = parse_price(tp_val)
+        logger.debug(f"Found multiple TP targets: {tp_targets}")
+    
     if entry_price:
-        if position.lower() == "long":
-            # For long positions, stop loss is below entry price
+        # Calculate stop loss value
+        if explicit_stop_loss:
+            stop_loss = explicit_stop_loss
+            logger.debug(f"Using explicit stop loss: {stop_loss}")
+        elif position.lower() == "long":
             stop_loss = entry_price * (1 - stop_loss_pct)
+            logger.debug(f"Using calculated long stop loss: {stop_loss}")
+        else:  # Short position
+            stop_loss = entry_price * (1 + stop_loss_pct)
+            logger.debug(f"Using calculated short stop loss: {stop_loss}")
+        
+        # Check if any TP targets were hit for long positions
+        if position.lower() == "long":
+            # Sort TP targets from lowest to highest (for long positions we hit the closest ones first)
+            hit_tp = None
+            hit_tp_num = None
+            if tp_targets:
+                for tp_num, tp_price in sorted(tp_targets.items(), key=lambda x: x[1]):
+                    if current_price >= tp_price:
+                        hit_tp = tp_price
+                        hit_tp_num = tp_num
+                        logger.debug(f"Hit TP{tp_num} at {tp_price}")
+                        break
+            
             # Check if target hit (price went up to target)
-            if target_price and current_price >= target_price:
+            if hit_tp:
+                signal["status"] = HIT_TARGET
+                signal["hit_tp"] = hit_tp_num
+                signal["performance"] = ((hit_tp - entry_price) / entry_price) * 100
+                signal["exit_price"] = hit_tp
+                signal["exit_date"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            elif target_price and current_price >= target_price:
                 signal["status"] = HIT_TARGET
                 signal["performance"] = ((target_price - entry_price) / entry_price) * 100
                 signal["exit_price"] = target_price
@@ -49,10 +86,25 @@ async def check_signal_performance(signal):
                 signal["exit_price"] = stop_loss
                 signal["exit_date"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         else:  # Short position
-            # For short positions, stop loss is above entry price
-            stop_loss = entry_price * (1 + stop_loss_pct)
+            # Sort TP targets from highest to lowest (for short positions we hit the closest ones first)
+            hit_tp = None
+            hit_tp_num = None
+            if tp_targets:
+                for tp_num, tp_price in sorted(tp_targets.items(), key=lambda x: x[1], reverse=True):
+                    if current_price <= tp_price:
+                        hit_tp = tp_price
+                        hit_tp_num = tp_num
+                        logger.debug(f"Hit TP{tp_num} at {tp_price}")
+                        break
+            
             # Check if target hit (price went down to target)
-            if target_price and current_price <= target_price:
+            if hit_tp:
+                signal["status"] = HIT_TARGET
+                signal["hit_tp"] = hit_tp_num
+                signal["performance"] = ((entry_price - hit_tp) / entry_price) * 100
+                signal["exit_price"] = hit_tp
+                signal["exit_date"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            elif target_price and current_price <= target_price:
                 signal["status"] = HIT_TARGET
                 signal["performance"] = ((entry_price - target_price) / entry_price) * 100
                 signal["exit_price"] = target_price
@@ -152,45 +204,92 @@ async def extract_signal_data(text):
     entry_price = None
     # Try patterns like "at 88k", "entry 88k", "price 88k", "88k"
     entry_patterns = [
-        r'(?:at|entry|price|@)\s*(\d+(?:\.\d+)?[kK]?)',  # at 88k, entry 88k, price 88k
-        r'(?:buy|long|short|sell).*?(\d+(?:\.\d+)?[kK]?)' # long BTC at 88k, short at 91k
+        r'(?:entry|enter at|entry at|entry price|buy at|sell at|at|price|@)\s*(\d+(?:,\d+)*(?:\.\d+)?[kK]?)',  # at 88k, entry 88k, price 88k
+        r'(?:buy|long|short|sell).*?(\d+(?:,\d+)*(?:\.\d+)?[kK]?)', # long BTC at 88k, short at 91k
+        r'\bentry\s*[:-]?\s*(\d+(?:,\d+)*(?:\.\d+)?[kK]?)',  # entry: 88k or entry - 88k
+        r'\blimit\s*[:-]?\s*(\d+(?:,\d+)*(?:\.\d+)?[kK]?)',  # limit: 88k
+        r'\border\s*[:-]?\s*(\d+(?:,\d+)*(?:\.\d+)?[kK]?)'  # order: 88k
     ]
     
     for pattern in entry_patterns:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
             entry_price = match.group(1)
+            # Remove commas from numbers like 1,000
+            entry_price = entry_price.replace(',', '')
             break
     
-    # Extract take profit/target (more patterns)
+    # Extract multiple take profit targets
+    take_profit_dict = {}
     take_profit = None
+    
+    # First look for specific TP1, TP2, TP3 format
+    tp_numbered_pattern = r'(?:tp|take profit|target|t\.p\.|tp target)\s*(\d+)\s*[:-]?\s*(\d+(?:,\d+)*(?:\.\d+)?[kK]?)'
+    for match in re.finditer(tp_numbered_pattern, text, re.IGNORECASE):
+        tp_number = int(match.group(1))
+        tp_value = match.group(2).replace(',', '')
+        take_profit_dict[tp_number] = tp_value
+        logger.debug(f"Found TP{tp_number}: {tp_value}")
+    
+    # Look for multiple take profits in other formats
     tp_patterns = [
-        r'(?:tp|target|take profit|price target|expecting).*?(\d+(?:\.\d+)?[kK]?)',  # tp at 146k, target 146k
-        r'(?:to reach|reach).*?(\d+(?:\.\d+)?[kK]?)'  # to reach 85k
+        # Main TP/target patterns
+        r'(?:tp|take profit|target|t\.p\.|price target)\s*[:-]?\s*(\d+(?:,\d+)*(?:\.\d+)?[kK]?)',  # tp: 146k, target: 146k
+        r'(?:tp|take profit|target|t\.p\.)[^0-9]*(\d+(?:,\d+)*(?:\.\d+)?[kK]?)',  # tp at 146k, target 146k
+        r'(?:to reach|reach)[^0-9]*(\d+(?:,\d+)*(?:\.\d+)?[kK]?)',  # to reach 85k
+        
+        # Common variations
+        r'\btp\b\s*(\d+(?:,\d+)*(?:\.\d+)?[kK]?)',  # tp 146k
+        r'\btarget\b\s*(\d+(?:,\d+)*(?:\.\d+)?[kK]?)',  # target 146k
+        r'\btarget price\b\s*[:-]?\s*(\d+(?:,\d+)*(?:\.\d+)?[kK]?)',  # target price: 146k
     ]
     
     for pattern in tp_patterns:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
-            take_profit = match.group(1)
+            take_profit = match.group(1).replace(',', '')
+            # If we found a general TP and don't already have a TP1, save it as TP1
+            if 1 not in take_profit_dict:
+                take_profit_dict[1] = take_profit
+            break
+    
+    # If we found multiple TPs, use the first one as the primary TP
+    if take_profit_dict:
+        sorted_tps = sorted(take_profit_dict.items())
+        if sorted_tps:
+            take_profit = sorted_tps[0][1]
+            logger.debug(f"Found multiple TPs: {take_profit_dict}, using {take_profit} as primary")
+    
+    # Extract stop loss
+    stop_loss = None
+    sl_patterns = [
+        r'(?:sl|stop loss|stop|s\.l\.)\s*[:-]?\s*(\d+(?:,\d+)*(?:\.\d+)?[kK]?)',  # sl: 75k
+        r'(?:sl|stop loss|stop|s\.l\.)[^0-9]*(\d+(?:,\d+)*(?:\.\d+)?[kK]?)',  # sl at 75k
+    ]
+    
+    for pattern in sl_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            stop_loss = match.group(1).replace(',', '')
+            logger.debug(f"Found stop loss: {stop_loss}")
             break
     
     # Extract timeframe from words or context
     timeframe = None
-    if re.search(r'\b(short(-|\s)?term|hourly|hours|short(\s)?frame|day|daily|intraday)\b', text, re.IGNORECASE):
+    if re.search(r'\b(short(-|\s)?term|hourly|hour|hours|short(\s)?frame|day|daily|intraday|scalp|scalping|quick|1h|4h)\b', text, re.IGNORECASE):
         timeframe = "SHORT"
-    elif re.search(r'\b(mid(-|\s)?term|mid|week|weekly|days|medium)\b', text, re.IGNORECASE):
+    elif re.search(r'\b(mid(-|\s)?term|mid|week|weekly|days|medium|1d|swing)\b', text, re.IGNORECASE):
         timeframe = "MID"
-    elif re.search(r'\b(long(-|\s)?term|long(\s)?frame|month|monthly|year|yearly)\b', text, re.IGNORECASE):
+    elif re.search(r'\b(long(-|\s)?term|long(\s)?frame|month|monthly|year|yearly|hodl|holding|investment)\b', text, re.IGNORECASE):
         timeframe = "LONG"
     
     # Extract risk level from various wordings
     risk_level = None
-    if re.search(r'\b(low[- ]?risk|safe|conservative)\b', text, re.IGNORECASE):
+    if re.search(r'\b(low[- ]?risk|safe|conservative|small risk|minimal risk)\b', text, re.IGNORECASE):
         risk_level = "LOW"
-    elif re.search(r'\b(medium[- ]?risk|moderate|mid[- ]?risk)\b', text, re.IGNORECASE):
+    elif re.search(r'\b(medium[- ]?risk|moderate|mid[- ]?risk|average risk|balanced)\b', text, re.IGNORECASE):
         risk_level = "MEDIUM"
-    elif re.search(r'\b(high[- ]?risk|risky|aggressive)\b', text, re.IGNORECASE):
+    elif re.search(r'\b(high[- ]?risk|risky|aggressive|speculative|yolo|dangerous)\b', text, re.IGNORECASE):
         risk_level = "HIGH"
     
     # Fallback: If a timeframe/risk level is not specified in context words,
@@ -207,5 +306,17 @@ async def extract_signal_data(text):
                 risk_level = risk
                 break
     
-    logger.debug(f"Extracted signal data: coin={coin}, position={position}, entry={entry_price}, tp={take_profit}, timeframe={timeframe}, risk={risk_level}")
-    return coin, timeframe, risk_level, entry_price, take_profit, position 
+    # Store all extracted data for easy access and extension
+    extracted_data = {
+        "coin": coin,
+        "position": position,
+        "entry_price": entry_price,
+        "take_profit": take_profit,
+        "take_profit_targets": take_profit_dict,
+        "stop_loss": stop_loss,
+        "timeframe": timeframe,
+        "risk_level": risk_level
+    }
+    
+    logger.debug(f"Extracted signal data: {extracted_data}")
+    return coin, timeframe, risk_level, entry_price, take_profit, position, stop_loss, extracted_data 

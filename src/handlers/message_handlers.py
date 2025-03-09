@@ -45,8 +45,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
             # Extract coin, timeframe, risk level, and other signal details
-            coin, timeframe, risk_level, limit_order, take_profit, position = await extract_signal_data(signal_text)
-            logger.info(f"Extracted data: coin={coin}, timeframe={timeframe}, risk={risk_level}, limit={limit_order}, tp={take_profit}, position={position}")
+            coin, timeframe, risk_level, limit_order, take_profit, position, stop_loss, extracted_data = await extract_signal_data(signal_text)
+            logger.info(f"Extracted data: {extracted_data}")
             
             # Respond in the group to confirm detection
             if coin:
@@ -58,8 +58,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 if limit_order:
                     confirmation_msg += f"• Entry: {limit_order}\n"
                 
-                if take_profit:
+                # Handle take profit targets
+                if extracted_data["take_profit_targets"]:
+                    # If we have multiple TPs, show them all
+                    tp_targets = extracted_data["take_profit_targets"]
+                    if len(tp_targets) > 1:
+                        confirmation_msg += "• Take Profit Targets:\n"
+                        for tp_num, tp_val in sorted(tp_targets.items()):
+                            confirmation_msg += f"  TP{tp_num}: {tp_val}\n"
+                    elif take_profit:
+                        confirmation_msg += f"• Take Profit: {take_profit}\n"
+                elif take_profit:
                     confirmation_msg += f"• Target: {take_profit}\n"
+                
+                if stop_loss:
+                    confirmation_msg += f"• Stop Loss: {stop_loss}\n"
                 
                 if timeframe:
                     confirmation_msg += f"• Timeframe: {timeframe}\n"
@@ -120,6 +133,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 new_signal["take_profit"] = take_profit
             if position:
                 new_signal["position"] = position
+            if stop_loss:
+                new_signal["stop_loss"] = stop_loss
+                
+            # Store multiple take profit targets if available
+            tp_targets = extracted_data["take_profit_targets"]
+            if tp_targets and len(tp_targets) > 0:
+                new_signal["take_profit_targets"] = tp_targets
+                
+            # Set initial status
+            new_signal["status"] = PENDING
             
             # Add to signals database
             signals_data["signals"].append(new_signal)
@@ -154,8 +177,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 else:
                     formatted_signal += f"*Limit Order:* Buy at {limit_order}\n"
             
-            if take_profit:
-                formatted_signal += f"*TP:* {take_profit}\n"
+            # Handle take profit targets
+            tp_targets = extracted_data["take_profit_targets"]
+            if tp_targets and len(tp_targets) > 1:
+                formatted_signal += "*Take Profit Targets:*\n"
+                for tp_num, tp_val in sorted(tp_targets.items()):
+                    formatted_signal += f"• TP{tp_num}: {tp_val}\n"
+            elif take_profit:
+                formatted_signal += f"*Take Profit:* {take_profit}\n"
+            
+            # Add stop loss if available
+            if stop_loss:
+                formatted_signal += f"*Stop Loss:* {stop_loss}\n"
             
             if position:
                 formatted_signal += f"*Position:* {position}\n"
