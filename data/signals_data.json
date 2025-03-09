@@ -1,0 +1,85 @@
+{
+    "signals": [
+        {
+            "id": "a3680d28-d985-416d-a839-594212ded3b2",
+            "coin": "BTC",
+            "position": "Short",
+            "limit_order": "85k",
+            "stop_loss": "86k",
+            "timeframe": "SHORT",
+            "risk_level": "LOW",
+            "text": "@PumpMyBagsBot short btc at 85k, tp1 is 84k, tp2 83k, low risk, stoploss 86k",
+            "username": "Xdaguy",
+            "user_id": "6787914335",
+            "status": "HIT TARGET",
+            "timestamp": "2025-03-09 18:15:07",
+            "votes": {
+                "up": [],
+                "down": []
+            },
+            "take_profit_targets": {
+                "1": "84k",
+                "2": "83k"
+            },
+            "take_profit": "84k",
+            "hit_tp": 1,
+            "performance": 1.1764705882352942,
+            "exit_price": 84000.0,
+            "exit_date": "2025-03-09 18:24:38"
+        },
+        {
+            "id": "aa0fd9a9-3c35-4d63-89f3-d7c756bfb174",
+            "coin": "BTC",
+            "position": "Long",
+            "limit_order": "85k",
+            "stop_loss": "86k",
+            "timeframe": "LONG",
+            "risk_level": "LOW",
+            "text": "@PumpMyBagsBot long btc at 85k, tp1 is 84k, tp2 83k, low risk, stoploss 86k",
+            "username": "Xdaguy",
+            "user_id": "6787914335",
+            "status": "HIT TARGET",
+            "timestamp": "2025-03-09 18:15:29",
+            "votes": {
+                "up": [],
+                "down": []
+            },
+            "take_profit_targets": {
+                "1": "84k",
+                "2": "83k"
+            },
+            "take_profit": "84k",
+            "hit_tp": 2,
+            "performance": -2.3529411764705883,
+            "exit_price": 83000.0,
+            "exit_date": "2025-03-09 18:24:38"
+        },
+        {
+            "id": "8d40445a-7cba-4b63-a55e-864ebe6c1dba",
+            "coin": "BTC",
+            "position": "Long",
+            "limit_order": "93k",
+            "stop_loss": "95k",
+            "timeframe": "LONG",
+            "risk_level": "LOW",
+            "text": "planning to short btc at 93k. I think it will hit 87k in long term, tp1 is at 90k, and tp2 at 87k, sl is 95k",
+            "username": "Xdaguy",
+            "user_id": "6787914335",
+            "status": "HIT TARGET",
+            "timestamp": "2025-03-09 18:17:52",
+            "votes": {
+                "up": [],
+                "down": []
+            },
+            "take_profit_targets": {
+                "2": "87k",
+                "1": "1"
+            },
+            "take_profit": "1",
+            "hit_tp": 1,
+            "performance": -99.9989247311828,
+            "exit_price": 1.0,
+            "exit_date": "2025-03-09 18:24:38"
+        }
+    ]
+}
